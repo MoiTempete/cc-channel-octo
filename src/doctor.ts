@@ -70,6 +70,8 @@ interface GlobalConfigShape {
   entries: DoctorBotEntry[];
   /** Global sdk block — the base every bot inherits. */
   sdk: SdkAuthInput;
+  /** True when the file exists but failed to parse — a broken install, not idle. */
+  broken?: string;
 }
 
 /**
@@ -86,16 +88,24 @@ function parseGlobalConfig(configPath: string): GlobalConfigShape {
   let topLevelBotToken: string | undefined;
   let bots: unknown[] = [];
   let sdkRaw: unknown;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'));
-    if (parsed && typeof parsed === 'object') {
-      const p = parsed as { botToken?: unknown; bots?: unknown; sdk?: unknown };
-      if (typeof p.botToken === 'string') topLevelBotToken = p.botToken;
-      if (Array.isArray(p.bots)) bots = p.bots;
-      sdkRaw = p.sdk;
+  let broken: string | undefined;
+  if (existsSync(configPath)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'));
+      if (parsed && typeof parsed === 'object') {
+        const p = parsed as { botToken?: unknown; bots?: unknown; sdk?: unknown };
+        if (typeof p.botToken === 'string') topLevelBotToken = p.botToken;
+        if (Array.isArray(p.bots)) bots = p.bots;
+        sdkRaw = p.sdk;
+      } else {
+        broken = 'config root is not a JSON object';
+      }
+    } catch (err) {
+      // A BROKEN config is exactly when doctor is run — reporting it as
+      // "idle, healthy" (exit 0) would be a false all-clear (runtime throws
+      // "Failed to parse config file" at boot).
+      broken = err instanceof Error ? err.message : String(err);
     }
-  } catch {
-    /* unparseable/missing → idle shape below */
   }
   let entries: DoctorBotEntry[] = [];
   if (bots.length > 0) {
@@ -113,11 +123,16 @@ function parseGlobalConfig(configPath: string): GlobalConfigShape {
   } else if (topLevelBotToken !== undefined) {
     // Legacy single-bot: resolveBotConfigs synthesizes { id: 'default', botToken }.
     entries = [{ id: 'default', inlineBotToken: topLevelBotToken }];
-  } else if (existsSync(join(baseDir, 'default', 'config.json'))) {
-    // Legacy single-bot whose token lives only in the per-bot file.
-    entries = [{ id: 'default' }];
+  } else {
+    // Legacy single-bot whose token lives only in the per-bot file — the
+    // runtime requires that file to actually carry a token before synthesizing
+    // 'default' (an empty file means idle, not a broken bot).
+    const legacyFile = join(baseDir, 'default', 'config.json');
+    if (existsSync(legacyFile) && readSdkAndToken(legacyFile).botToken) {
+      entries = [{ id: 'default' }];
+    }
   }
-  return { topLevelBotToken, entries, sdk: narrowSdk(sdkRaw) };
+  return { topLevelBotToken, entries, sdk: narrowSdk(sdkRaw), broken };
 }
 
 /** bot ids from the global config (same discovery rules as resolveBotConfigs). */
@@ -160,7 +175,10 @@ function readSdkAndToken(path: string): { sdk: SdkAuthInput; botToken: string | 
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
     if (parsed && typeof parsed === 'object') {
       const raw = parsed as { botToken?: unknown; sdk?: unknown };
-      if (typeof raw.botToken === 'string' && raw.botToken.length > 0) botToken = raw.botToken;
+      // Any explicit string — including "" — is a value: config.ts merges with
+      // `??`, and "" never falls through to the inline/top-level token (the
+      // runtime then fails boot on the empty token; doctor must say so too).
+      if (typeof raw.botToken === 'string') botToken = raw.botToken;
       if (raw.sdk && typeof raw.sdk === 'object' && !Array.isArray(raw.sdk)) {
         const own = narrowSdk(raw.sdk);
         botHasOwnSdk = own.apiKey !== undefined || (own.env !== undefined && Object.keys(own.env).length > 0);
@@ -237,6 +255,12 @@ export function doctorReport(
   // (top-level botToken / inline bots[] / per-bot file) so doctor diagnoses the
   // bots the runtime would ACTUALLY run.
   const global = parseGlobalConfig(configPath);
+  if (global.broken !== undefined) {
+    lines.push(`  PARSE ERROR: ${global.broken} — the runtime would fail to boot`);
+    lines.push('');
+    lines.push('verdict: CONFIG BROKEN — fix the JSON, then re-run doctor');
+    return { text: lines.join('\n'), missing: 1, hasBots: false };
+  }
   const globalSdk = global.sdk;
   const globalCredential = globalSdk.apiKey ?? firstCredential(globalSdk.env);
   const globalAuth = globalCredential
@@ -252,6 +276,14 @@ export function doctorReport(
   } else {
     for (const entry of global.entries) {
       const botId = entry.id;
+      // A bad inline id (../x, a/b) would make join() read OUTSIDE baseDir;
+      // the runtime rejects such ids at boot — warn instead of following the path.
+      if (!/^[a-zA-Z0-9._-]+$/.test(botId) || botId === '.' || botId === '..') {
+        lines.push(`bot "${botId}"`);
+        lines.push(`  WARNING: invalid bot id — the runtime would reject this config (use letters, digits, dot, underscore, hyphen)`);
+        missing++;
+        continue;
+      }
       const botCfgPath = join(baseDir, botId, 'config.json');
       lines.push(`bot "${botId}"`);
       lines.push(`  config: ${botCfgPath}`);

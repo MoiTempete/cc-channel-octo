@@ -145,6 +145,40 @@ describe('doctorReport', () => {
     expect(report.text).not.toContain('NOT FOUND')
   })
 
+  it('reports CONFIG BROKEN for a corrupt global config instead of idle-healthy', () => {
+    writeFileSync(cfgPath, '{ not valid json', { mode: 0o600 })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('CONFIG BROKEN')
+    expect(report.missing).toBe(1)
+  })
+
+  it('treats an empty legacy default/config.json as idle, not a broken bot', () => {
+    // Runtime: defaultPerBot.botToken falsy → resolveBotConfigs returns [] (idle).
+    writeGlobal(undefined)
+    mkdirSync(join(dir, 'default'), { recursive: true })
+    writeFileSync(join(dir, 'default', 'config.json'), '{}', { mode: 0o600 })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('none configured')
+    expect(report.missing).toBe(0)
+  })
+
+  it('does NOT fall back to an inline token when the per-bot file has an explicit empty botToken', () => {
+    // Runtime: perBotFile.botToken = "" is a string → ?? does NOT fall through
+    // → boot fails on the empty token. doctor must mirror that, not report OK.
+    writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }])
+    writeBot('default', { botToken: '' })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('MISSING BOT TOKEN')
+    expect(report.missing).toBe(1)
+  })
+
+  it('warns on an invalid inline bot id instead of following the path', () => {
+    writeGlobal([{ id: '../escape' }])
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('invalid bot id')
+    expect(report.missing).toBe(1)
+  })
+
   it('lists env var presence in the environment section', () => {
     writeGlobal([{ id: 'default' }])
     writeBot('default', { botToken: 'bf_abcDEF123456', sdk: { apiKey: 'sk-x' } })

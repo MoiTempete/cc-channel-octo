@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   parseArgs, isAlive, readPid, readPidRecord, writePid, removePid,
   resolveOwnedPid, resolveSupervisorPaths,
-  readVersion, parseVersion, run, assertValidBotId,
+  readVersion, parseVersion, run, assertValidBotId, displayImportedValue,
 } from '../cli.js';
 
 describe('parseArgs', () => {
@@ -74,6 +74,20 @@ describe('parseArgs', () => {
     }
     expect(() => assertValidBotId('default')).not.toThrow();
     expect(() => assertValidBotId('ops-2.b')).not.toThrow();
+  });
+});
+
+describe('displayImportedValue (allowlist masking)', () => {
+  it('prints allowlisted model/effort vars verbatim', () => {
+    expect(displayImportedValue('ANTHROPIC_MODEL', 'deepseek-v4-flash[1M]')).toBe('deepseek-v4-flash[1M]');
+    expect(displayImportedValue('CLAUDE_CODE_EFFORT_LEVEL', 'max')).toBe('max');
+  });
+  it('masks everything else, incl. headers and URLs that could carry credentials', () => {
+    const masked = displayImportedValue('ANTHROPIC_CUSTOM_HEADERS', 'Authorization: Bearer sk-secret-token');
+    expect(masked).not.toContain('sk-secret-token');
+    const urlMasked = displayImportedValue('ANTHROPIC_BASE_URL', 'https://user:pass@api.deepseek.com/anthropic');
+    expect(urlMasked).not.toContain('user:pass');
+    expect(displayImportedValue('ANTHROPIC_AUTH_TOKEN', 'sk-13def1b10d7c413c85fc3a8c0cd470fc')).toBe('sk-13****70fc');
   });
 });
 

@@ -138,6 +138,8 @@ export function isAuthError(err: unknown): boolean {
   // Anchor on the SDK subprocess's own signatures rather than bare words:
   // "authentication" or "401" alone appear in unrelated tool/service errors
   // (a skill's HTTP call, a MCP server), and misclassifying those would tell
-  // the owner to re-run setup for nothing.
-  return /not logged in|please run \/login|invalid api key|authentication (failed|error|required)|401 (unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
+  // the owner to re-run setup for nothing. Covers the Anthropic API's
+  // structured error strings: "invalid x-api-key" (401 JSON body),
+  // "authentication_error" (error type), "401 Unauthorized", "401: ...".
+  return /not logged in|please run \/login|invalid api key|invalid x-api-key|authentication_error|authentication (failed|error|required)|401[:\s]+(unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
 }

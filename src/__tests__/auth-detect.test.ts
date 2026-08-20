@@ -71,6 +71,11 @@ describe('isAuthError', () => {
     expect(isAuthError(new Error('API request failed with status 401 Unauthorized'))).toBe(true)
     expect(isAuthError(new Error('authentication failed: invalid api key'))).toBe(true)
   })
+  it('matches the Anthropic API structured error strings', () => {
+    expect(isAuthError(new Error('invalid x-api-key'))).toBe(true)
+    expect(isAuthError(new Error('authentication_error: invalid credentials'))).toBe(true)
+    expect(isAuthError(new Error('status code 401: unauthorized'))).toBe(true)
+  })
   it('does NOT match bare generic words (a tool call inside the agent may hit a 401)', () => {
     expect(isAuthError(new Error('tool api returned 401'))).toBe(false)
     expect(isAuthError(new Error('authentication service is down'))).toBe(false)

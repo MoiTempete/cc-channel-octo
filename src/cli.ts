@@ -41,7 +41,9 @@ export function readHiddenSecret(prompt: string): Promise<string> {
     stdin.setRawMode(true);
     stdin.resume();
     stdout.write(prompt);
-    let input = '';
+    // Accumulate BYTES (not chars): decoding per byte would garble multi-byte
+    // UTF-8 (a pasted key with a BOM or CJK chars). Decode once on Enter.
+    const input: Buffer[] = [];
     let inEscape = false;
     const onData = (chunk: Buffer): void => {
       // Scan BYTE by byte: a paste arrives as ONE chunk, so strict whole-chunk
@@ -55,12 +57,12 @@ export function readHiddenSecret(prompt: string): Promise<string> {
         }
         if (byte === 0x1b) { inEscape = true; continue; } // ESC
         if (byte === 0x0a || byte === 0x0d) {
-          // Enter submits the accumulated input.
+          // Enter submits the accumulated input, decoded as UTF-8.
           stdin.setRawMode(false);
           stdin.pause();
           stdin.removeListener('data', onData);
           stdout.write('\n');
-          resolve(input);
+          resolve(Buffer.concat(input).toString('utf8'));
           return;
         }
         if (byte === 0x03) {
@@ -73,14 +75,28 @@ export function readHiddenSecret(prompt: string): Promise<string> {
           return;
         }
         if (byte === 0x7f || byte === 0x08) {
-          input = input.slice(0, -1); // backspace
+          popUtf8Char(input); // backspace removes one full character
           continue;
         }
-        if (byte >= 0x20 && byte !== 0x7f) input += String.fromCharCode(byte);
+        if (byte >= 0x20 && byte !== 0x7f) input.push(Buffer.from([byte]));
       }
     };
     stdin.on('data', onData);
   });
+}
+
+/**
+ * Drop the trailing UTF-8 character from a byte array: backspace in raw mode
+ * arrives as one DEL byte, but a multi-byte char is several bytes — popping a
+ * single byte would leave a broken half-character in the buffer. Walk back
+ * past continuation bytes (0x80–0xBF) to the leading byte and remove the whole
+ * sequence.
+ */
+function popUtf8Char(input: Buffer[]): void {
+  if (input.length === 0) return;
+  let i = input.length - 1;
+  while (i > 0 && input[i][0] >= 0x80 && input[i][0] <= 0xbf) i--;
+  input.length = i; // removes input[i] and everything after it
 }
 
 /**
