@@ -179,6 +179,25 @@ describe('doctorReport', () => {
     expect(report.missing).toBe(1)
   })
 
+  it('reports CONFIG BROKEN for a corrupt per-bot file despite an inherited global key (r4 B2)', () => {
+    // Runtime readConfigFile throws for the same file at boot; a global
+    // sdk.apiKey must not turn this into verdict OK.
+    writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalKey12345' } })
+    mkdirSync(join(dir, 'default'), { recursive: true })
+    writeFileSync(join(dir, 'default', 'config.json'), '{ broken json', { mode: 0o600 })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('CONFIG BROKEN')
+    expect(report.missing).toBe(1)
+  })
+
+  it('discovers bots[] entries without an id (runtime synthesizes bot0/bot1) (r4 B3)', () => {
+    writeGlobal([{ botToken: 'bf_abcDEF123456' }])
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('bot "bot0"')
+    expect(report.text).not.toContain('none configured')
+    expect(report.missing).toBe(1) // the running bot0 has no auth source — not idle/exit 0
+  })
+
   it('lists env var presence in the environment section', () => {
     writeGlobal([{ id: 'default' }])
     writeBot('default', { botToken: 'bf_abcDEF123456', sdk: { apiKey: 'sk-x' } })
@@ -215,6 +234,10 @@ describe('runDoctor exit code (structured, not substring search)', () => {
   it('returns 0 for an inline bots[].botToken + global sdk.apiKey, no per-bot dir', () => {
     writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalInlineKey' } })
     expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(0)
+  })
+  it('returns 1 for an id-less bots[] entry with no auth (runtime runs it as bot0)', () => {
+    writeGlobal([{ botToken: 'bf_abcDEF123456' }])
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(1)
   })
   it('does not read ambient host state (env OR ~/.claude credentials must not flip the verdict)', () => {
     // The reviewer's host had a real ~/.claude/.credentials.json, which

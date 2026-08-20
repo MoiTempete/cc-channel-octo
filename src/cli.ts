@@ -35,6 +35,56 @@ import { runDoctor } from './doctor.js';
  * existing error path, so headless automation is unaffected. Ctrl+C / empty
  * input resolve to ''.
  */
+/**
+ * Hidden-input byte state machine — PURE, unit-tested.
+ *
+ * Terminal escape handling:
+ *   - ESC (0x1b) → escape state; the NEXT byte decides:
+ *       '[' (0x5b) → CSI sequence: consume parameter (0x30-0x3f) and
+ *                    intermediate (0x20-0x2f) bytes until a final byte
+ *                    (0x40-0x7e). Covers arrows (ESC [ A), Home/End
+ *                    (ESC [ H/F) and bracketed paste (ESC [ 200~ ... ESC [ 201~).
+ *       anything else → a two-byte escape (ESC O etc.): dropped.
+ *   - CSI ends on ANY final byte 0x40-0x7e — but NOT on '[' itself: 0x5b is
+ *     the CSI INTRODUCER, and treating it as a terminator leaks the rest of
+ *     every sequence into the secret (r4 B1, PTY-reproduced).
+ */
+export type HiddenKeyState = 'normal' | 'escape' | 'csi';
+
+export type HiddenKeyAction =
+  | { type: 'append'; byte: number }
+  | { type: 'backspace' }
+  | { type: 'submit' }
+  | { type: 'cancel' }
+  | { type: 'ignore' };
+
+export function processHiddenKeyByte(
+  state: HiddenKeyState,
+  byte: number,
+): { state: HiddenKeyState; action: HiddenKeyAction } {
+  switch (state) {
+    case 'normal':
+      if (byte === 0x1b) return { state: 'escape', action: { type: 'ignore' } };
+      if (byte === 0x0a || byte === 0x0d) return { state: 'normal', action: { type: 'submit' } };
+      if (byte === 0x03) return { state: 'normal', action: { type: 'cancel' } };
+      if (byte === 0x7f || byte === 0x08) return { state: 'normal', action: { type: 'backspace' } };
+      if (byte >= 0x20 && byte !== 0x7f) return { state: 'normal', action: { type: 'append', byte } };
+      return { state: 'normal', action: { type: 'ignore' } };
+    case 'escape':
+      // '[' starts a CSI sequence; any other byte is a two-byte escape — drop.
+      return byte === 0x5b
+        ? { state: 'csi', action: { type: 'ignore' } }
+        : { state: 'normal', action: { type: 'ignore' } };
+    case 'csi':
+      if (byte >= 0x40 && byte <= 0x7e) return { state: 'normal', action: { type: 'ignore' } }; // final byte
+      if ((byte >= 0x30 && byte <= 0x3f) || (byte >= 0x20 && byte <= 0x2f)) {
+        return { state: 'csi', action: { type: 'ignore' } }; // parameter / intermediate byte
+      }
+      if (byte === 0x1b) return { state: 'escape', action: { type: 'ignore' } }; // nested ESC
+      return { state: 'normal', action: { type: 'ignore' } }; // unexpected byte — drop and bail
+  }
+}
+
 export function readHiddenSecret(prompt: string): Promise<string> {
   return new Promise((resolve) => {
     if (!stdin.isTTY) return resolve('');
@@ -44,45 +94,25 @@ export function readHiddenSecret(prompt: string): Promise<string> {
     // Accumulate BYTES (not chars): decoding per byte would garble multi-byte
     // UTF-8 (a pasted key with a BOM or CJK chars). Decode once on Enter.
     const input: Buffer[] = [];
-    let inEscape = false;
+    let state: HiddenKeyState = 'normal';
     const onData = (chunk: Buffer): void => {
-      // Scan BYTE by byte: a paste arrives as ONE chunk, so strict whole-chunk
-      // equality against '\n'/'\r' would swallow the trailing newline into the
-      // secret (an opaque 401 later). Handle control bytes individually and
-      // drop escape sequences entirely: CSI ends on ANY byte in 0x40–0x7e
-      // (arrows are ESC [ A/B/C/D, Home/End are ESC [ H/F) — treating only '~'
-      // as the terminator would latch inEscape forever on one arrow key, after
-      // which even Enter/Ctrl+C get swallowed and the prompt hangs (reproduced
-      // under a real PTY).
       for (const byte of chunk) {
-        if (inEscape) {
-          if (byte >= 0x40 && byte <= 0x7e) inEscape = false; // CSI terminator
-          continue;
-        }
-        if (byte === 0x1b) { inEscape = true; continue; } // ESC
-        if (byte === 0x0a || byte === 0x0d) {
-          // Enter submits the accumulated input, decoded as UTF-8.
+        const r = processHiddenKeyByte(state, byte);
+        state = r.state;
+        if (r.action.type === 'submit' || r.action.type === 'cancel') {
+          const ok = r.action.type === 'submit';
           stdin.setRawMode(false);
           stdin.pause();
           stdin.removeListener('data', onData);
           stdout.write('\n');
-          resolve(Buffer.concat(input).toString('utf8'));
+          resolve(ok ? Buffer.concat(input).toString('utf8') : '');
           return;
         }
-        if (byte === 0x03) {
-          // Ctrl+C cancels.
-          stdin.setRawMode(false);
-          stdin.pause();
-          stdin.removeListener('data', onData);
-          stdout.write('\n');
-          resolve('');
-          return;
-        }
-        if (byte === 0x7f || byte === 0x08) {
+        if (r.action.type === 'backspace') {
           popUtf8Char(input); // backspace removes one full character
-          continue;
+        } else if (r.action.type === 'append') {
+          input.push(Buffer.from([r.action.byte]));
         }
-        if (byte >= 0x20 && byte !== 0x7f) input.push(Buffer.from([byte]));
       }
     };
     stdin.on('data', onData);

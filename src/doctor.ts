@@ -125,27 +125,30 @@ function parseGlobalConfig(configPath: string): GlobalConfigShape {
   }
   let entries: DoctorBotEntry[] = [];
   if (bots.length > 0) {
-    for (const b of bots) {
-      if (b && typeof b === 'object') {
-        const bb = b as { id?: unknown; botToken?: unknown };
-        if (typeof bb.id === 'string' && bb.id.length > 0) {
-          entries.push({
-            id: bb.id,
-            inlineBotToken: typeof bb.botToken === 'string' ? bb.botToken : undefined,
-          });
-        }
-      }
-    }
+    bots.forEach((b, i) => {
+      // resolveBotConfigs synthesizes `bot.id ?? \`bot${i}\`` — an entry
+      // without an id RUNS as bot0/bot1 at runtime, so doctor must discover it
+      // too (a bot0 with no auth source would otherwise report idle + exit 0).
+      const bb = b && typeof b === 'object' ? (b as { id?: unknown; botToken?: unknown }) : null;
+      entries.push({
+        id: bb && typeof bb.id === 'string' && bb.id.length > 0 ? bb.id : `bot${i}`,
+        inlineBotToken: bb && typeof bb.botToken === 'string' ? bb.botToken : undefined,
+      });
+    });
   } else if (topLevelBotToken !== undefined) {
     // Legacy single-bot: resolveBotConfigs synthesizes { id: 'default', botToken }.
     entries = [{ id: 'default', inlineBotToken: topLevelBotToken }];
   } else {
     // Legacy single-bot whose token lives only in the per-bot file — the
     // runtime requires that file to actually carry a token before synthesizing
-    // 'default' (an empty file means idle, not a broken bot).
+    // 'default' (an empty file means idle, not a broken bot); a corrupt file is
+    // discovered so the per-bot section can report CONFIG BROKEN.
     const legacyFile = join(baseDir, 'default', 'config.json');
-    if (existsSync(legacyFile) && readSdkAndToken(legacyFile).botToken) {
-      entries = [{ id: 'default' }];
+    if (existsSync(legacyFile)) {
+      const legacy = readSdkAndToken(legacyFile);
+      if (legacy.parseError !== undefined || legacy.botToken) {
+        entries = [{ id: 'default' }];
+      }
     }
   }
   return { topLevelBotToken, entries, sdk: narrowSdk(sdkRaw), broken };
@@ -181,12 +184,19 @@ function narrowSdk(raw: unknown): SdkAuthInput {
  * so an apiKey configured in the GLOBAL config.json counts for every bot that
  * doesn't override it, exactly as at runtime.
  */
-function readSdkAndToken(path: string): { sdk: SdkAuthInput; botToken: string | undefined; botHasOwnSdk: boolean } {
+function readSdkAndToken(path: string): {
+  sdk: SdkAuthInput;
+  botToken: string | undefined;
+  botHasOwnSdk: boolean;
+  /** Set when the file exists but fails to parse — the runtime THROWS at boot. */
+  parseError?: string;
+} {
   let sdk: SdkAuthInput = {};
   // undefined (NOT '') when absent: `??` in the caller must fall through to the
   // inline/top-level token exactly like config.ts's perBotFile.botToken ?? bot.botToken.
   let botToken: string | undefined;
   let botHasOwnSdk = false;
+  let parseError: string | undefined;
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
     if (parsed && typeof parsed === 'object') {
@@ -201,10 +211,14 @@ function readSdkAndToken(path: string): { sdk: SdkAuthInput; botToken: string | 
         sdk = own;
       }
     }
-  } catch {
-    /* unparseable — caller reports the failure */
+  } catch (err) {
+    // A corrupt per-bot config is exactly when doctor is run: reporting OK
+    // (auth inherited from the global sdk) would be a false all-clear, because
+    // the runtime's readConfigFile THROWS "Failed to parse config file" for the
+    // same file and the bot never starts (r4 B2).
+    parseError = err instanceof Error ? err.message : String(err);
   }
-  return { sdk, botToken, botHasOwnSdk };
+  return { sdk, botToken, botHasOwnSdk, parseError };
 }
 
 /** Merge a global sdk base with a per-bot override (shallow, per-bot wins). */
@@ -314,6 +328,15 @@ export function doctorReport(
         const mode = fileMode(botCfgPath);
         lines.push(`  mode ${mode ?? '?'}${permissionNote(mode)}`);
         const r = readSdkAndToken(botCfgPath);
+        if (r.parseError !== undefined) {
+          // Same false-all-clear class as the corrupt GLOBAL config: the
+          // runtime's readConfigFile throws for this file, so the bot never
+          // starts — an inherited global key must NOT turn this into verdict OK.
+          lines.push(`  PARSE ERROR: ${r.parseError} — the runtime would fail to boot this bot`);
+          lines.push('  verdict: CONFIG BROKEN');
+          missing++;
+          continue;
+        }
         fileSdk = r.sdk;
         fileToken = r.botToken;
         fileHasOwnSdk = r.botHasOwnSdk;
