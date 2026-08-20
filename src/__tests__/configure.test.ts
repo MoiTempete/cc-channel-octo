@@ -170,6 +170,23 @@ describe('configureFromClaude', () => {
     const result = configureFromClaude(claudeSettingsPath, cfgPath)
     expect(result.baseUrlConflict).toBe(true)
   })
+  it('Octo-Q P2: keyConflict uses the first NON-EMPTY imported credential', () => {
+    // `??` would pick the first DEFINED value — an empty API_KEY placeholder
+    // would mask the imported AUTH_TOKEN and miss the shadow warning.
+    writeFileSync(cfgPath, JSON.stringify({ sdk: { apiKey: 'sk-old' } }))
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: 'sk-new-token' } }))
+    const result = configureFromClaude(claudeSettingsPath, cfgPath)
+    expect(result.keyConflict).toBe(true)
+  })
+  it('Octo-Q P2: an empty imported ANTHROPIC_BASE_URL does not abort the whole import', () => {
+    // "" is a placeholder for "clear the override" — it shadows nothing and
+    // must not fail --from-claude entirely.
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: '', ANTHROPIC_MODEL: 'm' } }))
+    const result = configureFromClaude(claudeSettingsPath, cfgPath)
+    expect(result.imported.ANTHROPIC_BASE_URL).toBe('')
+    expect(result.imported.ANTHROPIC_MODEL).toBe('m')
+    expect(result.baseUrlConflict).toBe(false) // empty import shadows nothing
+  })
 })
 
 describe('normalizeGatewayUrl', () => {

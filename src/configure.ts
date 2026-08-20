@@ -225,10 +225,12 @@ export function configureFromClaude(
   // with a leading-space prefix that the value test would miss — the WHATWG
   // URL parser trims leading C0 whitespace on the consumer side). Values are
   // TRIMMED before the check AND persisted trimmed, so a " https://…" prefix
-  // can neither bypass the gate nor reach the subprocess.
+  // can neither bypass the gate nor reach the subprocess. EMPTY values (a
+  // common placeholder for "clear this override") skip the gate entirely —
+  // they shadow nothing at runtime and must not abort the whole import.
   for (const [key, value] of Object.entries(imported)) {
     const v = value.trim()
-    if ((/^https?:\/\//i.test(v) || /(?:^|_)[A-Za-z0-9]+_URL$/.test(key)) && !isAllowedApiUrl(v)) {
+    if (v.length > 0 && (/^https?:\/\//i.test(v) || /(?:^|_)[A-Za-z0-9]+_URL$/.test(key)) && !isAllowedApiUrl(v)) {
       throw new Error(
         `configure --from-claude: unsafe ${key}=${displayBaseUrl(v)} in ${claudeSettingsPath} ` +
         `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
@@ -254,18 +256,29 @@ export function configureFromClaude(
   // P2-2: buildSdkEnv layers sdk.apiKey AFTER sdk.env, so a key written by an
   // earlier `configure --gateway-url --api-key` silently shadows an imported
   // token — warn symmetrically with baseUrlConflict. Same global-config check.
-  // Non-empty on the imported side too (R7 P2): an imported "" raises no
-  // shadow warning, mirroring the existing-side non-empty rule.
-  const importedKey =
-    (imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN ?? imported.CLAUDE_CODE_OAUTH_TOKEN) || undefined
+  // FIRST NON-EMPTY imported credential (Octo-Q P2): `??` picks the first
+  // DEFINED value, so `{ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "tok"}`
+  // would resolve to "" and miss the shadow — pick the first usable one.
+  const importedKeyNonEmpty =
+    (imported.ANTHROPIC_API_KEY && imported.ANTHROPIC_API_KEY.length > 0)
+      ? imported.ANTHROPIC_API_KEY
+      : (imported.ANTHROPIC_AUTH_TOKEN && imported.ANTHROPIC_AUTH_TOKEN.length > 0)
+        ? imported.ANTHROPIC_AUTH_TOKEN
+        : (imported.CLAUDE_CODE_OAUTH_TOKEN && imported.CLAUDE_CODE_OAUTH_TOKEN.length > 0)
+          ? imported.CLAUDE_CODE_OAUTH_TOKEN
+          : undefined
+  const importedBaseUrlNonEmpty =
+    imported.ANTHROPIC_BASE_URL && imported.ANTHROPIC_BASE_URL.length > 0
+      ? imported.ANTHROPIC_BASE_URL
+      : undefined
   let baseUrlConflict =
     // Non-empty only (R6): a cleared `--api-key ""` (or empty base URL) does
     // not shadow anything at runtime — buildSdkEnv skips falsy values.
     typeof existingSdk.anthropicBaseUrl === 'string' &&
       (existingSdk.anthropicBaseUrl as string).length > 0 &&
-      imported.ANTHROPIC_BASE_URL !== undefined
+      importedBaseUrlNonEmpty !== undefined
   let keyConflict =
-    typeof existingSdk.apiKey === 'string' && (existingSdk.apiKey as string).length > 0 && importedKey !== undefined
+    typeof existingSdk.apiKey === 'string' && (existingSdk.apiKey as string).length > 0 && importedKeyNonEmpty !== undefined
   if (globalConfigPath !== undefined && globalConfigPath !== configPath) {
     try {
       const globalExisting = readExisting(globalConfigPath)
@@ -280,7 +293,7 @@ export function configureFromClaude(
         typeof gsdk.anthropicBaseUrl === 'string' &&
         (gsdk.anthropicBaseUrl as string).length > 0
       ) baseUrlConflict = true
-      if (importedKey !== undefined && typeof gsdk.apiKey === 'string' && (gsdk.apiKey as string).length > 0) keyConflict = true
+      if (importedKeyNonEmpty !== undefined && typeof gsdk.apiKey === 'string' && (gsdk.apiKey as string).length > 0) keyConflict = true
     } catch {
       // keep the per-file result when the global config is unreadable
     }

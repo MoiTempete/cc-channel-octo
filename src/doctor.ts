@@ -292,7 +292,12 @@ export function doctorReport(
     return { text: lines.join('\n'), missing: 1, hasBots: false };
   }
   const globalSdk = global.sdk;
-  const globalCredential = globalSdk.apiKey ?? firstCredential(globalSdk.env);
+  // Non-empty first (Octo-Q nit): an empty sdk.apiKey must not hide an
+  // sdk.env credential in the summary display.
+  const globalCredential =
+    globalSdk.apiKey !== undefined && globalSdk.apiKey.length > 0
+      ? globalSdk.apiKey
+      : firstCredential(globalSdk.env);
   const globalAuth = globalCredential
     ? `credential ${maskKey(globalCredential)}`
     : 'unset';
@@ -358,7 +363,12 @@ export function doctorReport(
       // "(from global config)" is only true when the winning source is config-
       // based AND the bot carries no own sdk block — process.env / oauth-file
       // never come from the global config.
-      const configBased = sources.some((s) => s.kind === 'config.apiKey' || s.kind === 'config.env');
+      // Non-empty config sources only (Octo-Q nit): an EMPTY config.env shadow
+      // in the B5 mixed case must not label the inherited process.env source
+      // as "(from global config)".
+      const configBased = sources.some(
+        (s) => !s.empty && (s.kind === 'config.apiKey' || s.kind === 'config.env'),
+      );
       const originNote = configBased && !fileHasOwnSdk ? ' (from global config)' : '';
       lines.push(`  Claude auth: ${describeSources(sources)}${originNote}`);
       if (!hasUsableAuthSource(sources)) {
@@ -373,8 +383,16 @@ export function doctorReport(
 
   // --- Environment ---
   const env = baseEnv as DoctorEnv;
+  // Non-empty first (Octo-Q nit): an empty declared API_KEY must not hide an
+  // inherited AUTH_TOKEN in the environment section.
   const procCredential =
-    env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.CLAUDE_CODE_OAUTH_TOKEN;
+    env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY.length > 0
+      ? env.ANTHROPIC_API_KEY
+      : env.ANTHROPIC_AUTH_TOKEN && env.ANTHROPIC_AUTH_TOKEN.length > 0
+        ? env.ANTHROPIC_AUTH_TOKEN
+        : env.CLAUDE_CODE_OAUTH_TOKEN && env.CLAUDE_CODE_OAUTH_TOKEN.length > 0
+          ? env.CLAUDE_CODE_OAUTH_TOKEN
+          : undefined;
   lines.push('environment');
   // "(present in gateway env)" rather than "(inherited into the SDK
   // subprocess)": a declared sdk.env value may shadow this variable there (R7).
