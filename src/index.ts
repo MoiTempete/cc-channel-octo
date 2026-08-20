@@ -28,7 +28,7 @@ import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
-import { detectAuthSources, isAuthError } from './auth-detect.js';
+import { detectAuthSources, hasUsableAuthSource, isAuthError } from './auth-detect.js';
 import { resolveGroupInstructions } from './group-md.js';
 import { GroupMdCache, ThreadMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
 import { GroupMdWriteback, ThreadMdWriteback } from './group-md-writeback.js';
@@ -179,9 +179,9 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   // Keychain-only OAuth login has no static file to probe, so this is a
   // WARNING, never a boot failure (same spirit as the Q12 permission warning).
   const authSources = detectAuthSources(config.sdk, process.env);
-  if (authSources.length === 0) {
+  if (!hasUsableAuthSource(authSources)) {
     console.warn(
-      `[cc-channel-octo] ${label}WARNING: no Claude authentication detected for this bot — ` +
+      `[cc-channel-octo] ${label}WARNING: no usable Claude authentication detected for this bot — ` +
       `the first message will fail with "Not logged in". Fix with one of:\n` +
       `  - npm run setup (source) / cc-channel-octo configure --from-claude (global)  (import the env block of ~/.claude/settings.json: token + base URL + model mapping)\n` +
       `  - CC_OCTO_CONFIGURE_API_KEY=<key> cc-channel-octo configure --gateway-url <url>  (key stays out of argv/history)\n` +
@@ -193,7 +193,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
   } else {
     console.log(
       `[cc-channel-octo] ${label}Claude auth: ${authSources
-        .map((s) => (s.masked ? `${s.kind} (${s.masked})` : s.kind))
+        .map((s) => (s.empty ? s.describe : s.masked ? `${s.kind} (${s.masked})` : s.kind))
         .join(', ')}`,
     );
   }

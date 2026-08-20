@@ -36,6 +36,9 @@ export function configure(
   if (!gatewayUrl) throw new Error('configure: --gateway-url is required')
   // undefined = not provided (P2-10); an explicit EMPTY string clears a key.
   if (apiKey === undefined) throw new Error('configure: --api-key is required')
+  // Trim surrounding whitespace (R6): a trailing newline in
+  // CC_OCTO_CONFIGURE_API_KEY must not be persisted into the subprocess env.
+  apiKey = apiKey.trim()
   // The gateway receives the API key + all prompt/response content, so it gets
   // the same SSRF policy as apiUrl (mirrors loadConfig's anthropicBaseUrl check).
   if (!isAllowedApiUrl(gatewayUrl)) {
@@ -103,9 +106,10 @@ function readExisting(path: string): Record<string, unknown> {
  * writer. The pid+timestamp name makes a real collision practically impossible.
  */
 function writeAtomic(path: string, merged: Record<string, unknown>): void {
-  // 0700, not the ambient-umask default (R5 P2-9): the 0600 file is useless if
-  // a co-located user can rename it away via a group/other-writable directory
-  // and repoint anthropicBaseUrl at a host that receives the key + traffic.
+  // 0700 on CREATED directories, not the ambient-umask default (R5 P2-9): the
+  // 0600 file is useless if a co-located user can rename it away via a
+  // group/other-writable directory. Note: mode applies only when the directory
+  // is created — a PRE-EXISTING group/other-writable parent is not repaired.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   try {
@@ -227,8 +231,13 @@ export function configureFromClaude(
   // token — warn symmetrically with baseUrlConflict. Same global-config check.
   const importedKey = imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN
   let baseUrlConflict =
-    typeof existingSdk.anthropicBaseUrl === 'string' && imported.ANTHROPIC_BASE_URL !== undefined
-  let keyConflict = typeof existingSdk.apiKey === 'string' && importedKey !== undefined
+    // Non-empty only (R6): a cleared `--api-key ""` (or empty base URL) does
+    // not shadow anything at runtime — buildSdkEnv skips falsy values.
+    typeof existingSdk.anthropicBaseUrl === 'string' &&
+      (existingSdk.anthropicBaseUrl as string).length > 0 &&
+      imported.ANTHROPIC_BASE_URL !== undefined
+  let keyConflict =
+    typeof existingSdk.apiKey === 'string' && (existingSdk.apiKey as string).length > 0 && importedKey !== undefined
   if (globalConfigPath !== undefined && globalConfigPath !== configPath) {
     try {
       const globalExisting = readExisting(globalConfigPath)
@@ -236,8 +245,8 @@ export function configureFromClaude(
         globalExisting.sdk && typeof globalExisting.sdk === 'object' && !Array.isArray(globalExisting.sdk)
           ? (globalExisting.sdk as Record<string, unknown>)
           : {}
-      if (typeof gsdk.anthropicBaseUrl === 'string') baseUrlConflict = true
-      if (typeof gsdk.apiKey === 'string') keyConflict = true
+      if (typeof gsdk.anthropicBaseUrl === 'string' && (gsdk.anthropicBaseUrl as string).length > 0) baseUrlConflict = true
+      if (typeof gsdk.apiKey === 'string' && (gsdk.apiKey as string).length > 0) keyConflict = true
     } catch {
       // keep the per-file result when the global config is unreadable
     }

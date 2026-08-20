@@ -16,6 +16,7 @@ import { dirname, join } from 'node:path';
 import { DEFAULT_CONFIG_PATH } from './config.js';
 import {
   detectAuthSources,
+  hasUsableAuthSource,
   maskKey,
   KEY_ENV_VARS,
   DEFAULT_CREDENTIALS_PATH,
@@ -259,7 +260,9 @@ function describeSources(sources: AuthSourceInfo[]): string {
   if (sources.length === 0) {
     return 'UNKNOWN — no static auth source (macOS Keychain-only OAuth is not statically detectable; verify with `claude auth status`)';
   }
-  return sources.map((s) => (s.masked ? `${s.kind} (${s.masked})` : s.kind)).join(', ');
+  return sources
+    .map((s) => (s.empty ? s.describe : s.masked ? `${s.kind} (${s.masked})` : s.kind))
+    .join(', ');
 }
 
 /**
@@ -301,7 +304,7 @@ export function doctorReport(
   const globalSdk = global.sdk;
   const globalCredential = globalSdk.apiKey ?? firstCredential(globalSdk.env);
   const globalAuth = globalCredential
-    ? `apiKey ${maskKey(globalCredential)}`
+    ? `credential ${maskKey(globalCredential)}`
     : 'unset';
   lines.push(`  sdk: ${globalAuth} (base inherited by all bots)`);
 
@@ -368,8 +371,8 @@ export function doctorReport(
       const configBased = sources.some((s) => s.kind === 'config.apiKey' || s.kind === 'config.env');
       const originNote = configBased && !fileHasOwnSdk ? ' (from global config)' : '';
       lines.push(`  Claude auth: ${describeSources(sources)}${originNote}`);
-      if (sources.length === 0) {
-        lines.push('  verdict: UNKNOWN (no static auth source)');
+      if (!hasUsableAuthSource(sources)) {
+        lines.push('  verdict: UNKNOWN (no usable auth source)');
         missing++;
       } else {
         lines.push('  verdict: OK');

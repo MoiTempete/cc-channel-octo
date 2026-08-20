@@ -47,7 +47,7 @@ describe('doctorReport', () => {
     writeBot('default', { botToken: 'bf_abcDEF123456' })
     const report = doctorReport(cfgPath, {}, NO_CREDS)
     expect(report.missing).toBe(1)
-    expect(report.text).toContain('verdict: UNKNOWN (no static auth source)')
+    expect(report.text).toContain('verdict: UNKNOWN (no usable auth source)')
     expect(report.text).toContain('npm run setup') // the first suggested fix
     expect(report.text).toContain('claude auth status') // Keychain hedge
   })
@@ -87,7 +87,7 @@ describe('doctorReport', () => {
     writeGlobal([{ id: 'default' }], { sdk: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-globalAuthToken' } } })
     writeBot('default', { botToken: 'bf_abcDEF123456' })
     const report = doctorReport(cfgPath, {}, NO_CREDS)
-    expect(report.text).toContain('sdk: apiKey sk-gl****oken (base inherited by all bots)')
+    expect(report.text).toContain('sdk: credential sk-gl****oken (base inherited by all bots)')
   })
 
   it('multi-bot: counts missing per bot and does not let a healthy sibling mask a broken one (P1-3)', () => {
@@ -150,6 +150,27 @@ describe('doctorReport', () => {
     const report = doctorReport(cfgPath, {}, NO_CREDS)
     expect(report.text).toContain('CONFIG BROKEN')
     expect(report.missing).toBe(1)
+  })
+
+  it('R6 B4: a declared-but-EMPTY sdk.env credential is NOT a usable source (false all-clear)', () => {
+    // buildSdkEnv spreads the empty value over the inherited env → the
+    // subprocess has no credential; doctor must count it as missing, not OK.
+    writeGlobal([{ id: 'default' }], { sdk: { env: { ANTHROPIC_API_KEY: '' } } })
+    writeBot('default', { botToken: 'bf_abcDEF123456' })
+    const report = doctorReport(cfgPath, { ANTHROPIC_API_KEY: 'sk-inherited' }, NO_CREDS)
+    expect(report.missing).toBe(1)
+    expect(report.text).toContain('declared but EMPTY')
+    expect(report.text).toContain('verdict: UNKNOWN (no usable auth source)')
+  })
+  it('R6 B4: an empty config credential hides an inherited fallback from the summary', () => {
+    // Same shape as the reviewer's repro: config declares "" + a REAL inherited
+    // ANTHROPIC_AUTH_TOKEN. The empty config value shadows it at runtime, so
+    // attribution stays on config.env(empty) and the bot is missing.
+    writeGlobal([{ id: 'default' }], { sdk: { env: { ANTHROPIC_API_KEY: '' } } })
+    writeBot('default', { botToken: 'bf_abcDEF123456' })
+    const report = doctorReport(cfgPath, { ANTHROPIC_AUTH_TOKEN: 'sk-inherited-token' }, NO_CREDS)
+    expect(report.missing).toBe(1)
+    expect(report.text).not.toContain('process.env')
   })
 
   it('treats an empty legacy default/config.json as idle, not a broken bot', () => {

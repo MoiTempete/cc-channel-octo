@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { detectAuthSources, maskKey, isAuthError } from '../auth-detect.js'
+import { detectAuthSources, hasUsableAuthSource, maskKey, isAuthError } from '../auth-detect.js'
 
 const NO_CREDS = '/nonexistent/.claude/.credentials.json'
 
@@ -83,6 +83,19 @@ describe('detectAuthSources', () => {
     )
     expect(sources.map((s) => s.kind)).toEqual(['config.env'])
     expect(sources[0].masked).toBe('****')
+    // R6 B4: the empty source must be flagged as empty — verdicts count it
+    // as missing instead of a false all-clear.
+    expect(sources[0].empty).toBe(true)
+    expect(hasUsableAuthSource(sources)).toBe(false)
+  })
+  it('a non-empty config credential is usable even when it shadows', () => {
+    const sources = detectAuthSources(
+      { env: { ANTHROPIC_AUTH_TOKEN: 'sk-gw-token' } },
+      { ANTHROPIC_API_KEY: 'sk-real-inherited' },
+      NO_CREDS,
+    )
+    expect(sources[0].empty).toBeUndefined()
+    expect(hasUsableAuthSource(sources)).toBe(true)
   })
   it('ignores truly-absent keys', () => {
     expect(detectAuthSources({}, {}, NO_CREDS)).toEqual([])

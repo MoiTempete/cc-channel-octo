@@ -38,6 +38,14 @@ export interface AuthSourceInfo {
   masked?: string;
   /** Human-readable one-liner for diagnosis output. */
   describe: string;
+  /**
+   * True when the source is DECLARED but carries no usable value (e.g.
+   * sdk.env.ANTHROPIC_API_KEY: ""). Such a source still SHADOWS inherited
+   * credentials at runtime (buildSdkEnv spreads it over the process env), so
+   * it must be surfaced — but it does NOT authenticate, and verdicts must
+   * count it as missing (R6 B4: declared-but-empty produced a false OK).
+   */
+  empty?: boolean;
 }
 
 /**
@@ -112,13 +120,19 @@ export function detectAuthSources(
   } else if (envDeclaresCredential(sdk.env)) {
     // Model the buildSdkEnv overlay: sdk.env spreads OVER the process env, so
     // a key declared in config — even with an empty value — SHADOWS the
-    // inherited one (R5 P2-1: an empty config value makes the subprocess
-    // unauthenticated; reporting process.env as the source would be wrong).
+    // inherited one (R5 P2-1). But a declared-but-EMPTY value does not
+    // authenticate: buildSdkEnv hands the subprocess the empty string and the
+    // first message fails with "Not logged in". Surface it as an empty source
+    // so verdicts count it as missing instead of a false OK (R6 B4).
     const envKey = firstEnvValue(sdk.env);
     sources.push({
       kind: 'config.env',
       masked: envKey !== undefined ? maskKey(envKey) : '****',
-      describe: 'sdk.env.ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config',
+      ...(envKey === undefined ? { empty: true } : {}),
+      describe:
+        envKey !== undefined
+          ? 'sdk.env.ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config'
+          : 'sdk.env credential declared but EMPTY — shadows inherited credentials, does not authenticate',
     });
   } else {
     const procKey = firstEnvValue(baseEnv as Record<string, string | undefined>);
@@ -150,6 +164,14 @@ export function detectAuthSources(
     /* absent, unreadable, or not a credentials JSON — treat as no OAuth login */
   }
   return sources;
+}
+
+/**
+ * True when at least one source actually authenticates (a declared-but-empty
+ * source shadows inherited credentials but carries no value — R6 B4).
+ */
+export function hasUsableAuthSource(sources: AuthSourceInfo[]): boolean {
+  return sources.some((s) => !s.empty);
 }
 
 /**
