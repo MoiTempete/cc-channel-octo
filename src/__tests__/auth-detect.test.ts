@@ -27,7 +27,7 @@ describe('maskKey', () => {
     expect(maskKey('short')).toBe('****')
     expect(maskKey('sk-ihDN61Jfo')).toBe('****') // 12 chars
     expect(maskKey('sk-ihDN61Jf')).toBe('****')
-    expect(maskKey('sk-13def1b10d7')).toBe('sk****d7') // 14 chars: 4 visible
+    expect(maskKey('sk-fake-abcdef')).toBe('sk****ef') // 14 chars: 4 visible
   })
 })
 

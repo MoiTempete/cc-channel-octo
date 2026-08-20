@@ -87,7 +87,7 @@ describe('displayImportedValue (allowlist masking)', () => {
     expect(masked).not.toContain('sk-secret-token');
     const urlMasked = displayImportedValue('ANTHROPIC_BASE_URL', 'https://user:pass@api.deepseek.com/anthropic');
     expect(urlMasked).not.toContain('user:pass');
-    expect(displayImportedValue('ANTHROPIC_AUTH_TOKEN', 'sk-13def1b10d7c413c85fc3a8c0cd470fc')).toBe('sk-13****70fc');
+    expect(displayImportedValue('ANTHROPIC_AUTH_TOKEN', 'sk-fake-token-1234567890abcdef')).toBe('sk-fa****cdef');
   });
 });
 

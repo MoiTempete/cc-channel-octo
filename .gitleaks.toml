@@ -1,0 +1,26 @@
+# gitleaks configuration — extends the default rule set.
+#
+# The auth-guidance test suite exercises detection/masking with deliberately
+# FAKE credentials shaped like real ones, which gitleaks' generic-api-key
+# rule flags by entropy. We allowlist the EXACT fixture values — never whole
+# files — so a real secret accidentally added to a test file is still caught.
+# When adding a new fake fixture value that is high-entropy enough to trip
+# the scan, add it here.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exact test-fixture credential values (deliberately fake — never real secrets)"
+regexes = [
+  '''bf_abcDEF123456''',
+  '''sk-topSecretValue''',
+  '''sk-globalSecretKey''',
+  '''sk-globalKey12345''',
+  '''sk-globalInlineKey''',
+  '''sk-inheritedKey''',
+  '''sk-goodKey12345''',
+  '''sk-healthyKey123''',
+  '''sk-globalAuthToken''',
+  '''sk-abcDEF12345678''',
+  '''sk-fake-token-1234567890abcdef''',
+]
