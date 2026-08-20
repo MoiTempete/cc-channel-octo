@@ -98,6 +98,31 @@ describe('detectAuthSources', () => {
     expect(sources[0].empty).toBeUndefined()
     expect(hasUsableAuthSource(sources)).toBe(true)
   })
+  it('R7 B5: an empty declared credential does NOT hide a DIFFERENT inherited credential variable', () => {
+    // buildSdkEnv spreads PER VARIABLE: ANTHROPIC_API_KEY: "" shadows only
+    // ANTHROPIC_API_KEY — an inherited ANTHROPIC_AUTH_TOKEN still reaches the
+    // subprocess and authenticates. The empty shadow is surfaced, and the
+    // inherited token counts as usable.
+    const sources = detectAuthSources(
+      { env: { ANTHROPIC_API_KEY: '' } },
+      { ANTHROPIC_AUTH_TOKEN: 'sk-inherited-token' },
+      NO_CREDS,
+    )
+    expect(sources.map((s) => s.kind)).toEqual(['config.env', 'process.env'])
+    expect(sources[0].empty).toBe(true) // the empty shadow is still surfaced
+    expect(sources[1].empty).toBeUndefined()
+    expect(hasUsableAuthSource(sources)).toBe(true)
+  })
+  it('the same-variable empty shadow still hides the inherited value (buildSdkEnv overlay)', () => {
+    const sources = detectAuthSources(
+      { env: { ANTHROPIC_API_KEY: '' } },
+      { ANTHROPIC_API_KEY: 'sk-real-inherited' },
+      NO_CREDS,
+    )
+    expect(sources.map((s) => s.kind)).toEqual(['config.env'])
+    expect(sources[0].empty).toBe(true)
+    expect(hasUsableAuthSource(sources)).toBe(false)
+  })
   it('ignores truly-absent keys', () => {
     expect(detectAuthSources({}, {}, NO_CREDS)).toEqual([])
   })

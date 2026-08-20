@@ -89,22 +89,6 @@ export const KEY_ENV_VARS = [
   'CLAUDE_CODE_OAUTH_TOKEN',
 ] as const;
 
-/** First non-empty value of the named env vars, or undefined. */
-function firstEnvValue(env: Record<string, string | undefined> | undefined): string | undefined {
-  if (!env) return undefined;
-  for (const name of KEY_ENV_VARS) {
-    const v = env[name];
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-  return undefined;
-}
-
-/** True when `env` declares ANY credential key, even with an empty value. */
-function envDeclaresCredential(env: Record<string, string | undefined> | undefined): boolean {
-  if (!env) return false;
-  return KEY_ENV_VARS.some((name) => Object.prototype.hasOwnProperty.call(env, name));
-}
-
 export function detectAuthSources(
   sdk: SdkAuthInput,
   baseEnv: NodeJS.ProcessEnv,
@@ -117,31 +101,47 @@ export function detectAuthSources(
       masked: maskKey(sdk.apiKey),
       describe: 'sdk.apiKey in config (forwarded as ANTHROPIC_API_KEY)',
     });
-  } else if (envDeclaresCredential(sdk.env)) {
-    // Model the buildSdkEnv overlay: sdk.env spreads OVER the process env, so
-    // a key declared in config — even with an empty value — SHADOWS the
-    // inherited one (R5 P2-1). But a declared-but-EMPTY value does not
-    // authenticate: buildSdkEnv hands the subprocess the empty string and the
-    // first message fails with "Not logged in". Surface it as an empty source
-    // so verdicts count it as missing instead of a false OK (R6 B4).
-    const envKey = firstEnvValue(sdk.env);
-    sources.push({
-      kind: 'config.env',
-      masked: envKey !== undefined ? maskKey(envKey) : '****',
-      ...(envKey === undefined ? { empty: true } : {}),
-      describe:
-        envKey !== undefined
-          ? 'sdk.env.ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config'
-          : 'sdk.env credential declared but EMPTY — shadows inherited credentials, does not authenticate',
-    });
   } else {
-    const procKey = firstEnvValue(baseEnv as Record<string, string | undefined>);
-    if (procKey !== undefined) {
-      sources.push({
-        kind: 'process.env',
-        masked: maskKey(procKey),
-        describe: 'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in the gateway process environment',
-      });
+    // Model buildSdkEnv's PER-VARIABLE overlay (R7 B5): sdk.env spreads over
+    // the process env variable by variable, so declaring ANTHROPIC_API_KEY: ""
+    // shadows only ANTHROPIC_API_KEY — an inherited ANTHROPIC_AUTH_TOKEN (or
+    // CLAUDE_CODE_OAUTH_TOKEN) still reaches the subprocess intact and
+    // authenticates. Walk each KEY_ENV_VAR: a declared value wins (empty →
+    // empty source, shadows that variable only), otherwise the inherited value
+    // counts. The first usable source is reported; empty declarations are
+    // surfaced so verdicts can explain what shadows what.
+    const env = sdk.env as Record<string, string | undefined> | undefined;
+    let reportedEmpty = false;
+    for (const name of KEY_ENV_VARS) {
+      const declared = env !== undefined && Object.prototype.hasOwnProperty.call(env, name);
+      const value = declared ? env?.[name] : baseEnv[name];
+      if (declared && typeof value === 'string' && value.length > 0) {
+        sources.push({
+          kind: 'config.env',
+          masked: maskKey(value),
+          describe: `sdk.env.${name} in config`,
+        });
+        break; // usable config credential — stop at the first
+      }
+      if (declared) {
+        if (!reportedEmpty) {
+          sources.push({
+            kind: 'config.env',
+            masked: '****',
+            empty: true,
+            describe: `sdk.env.${name} declared but EMPTY — shadows inherited ${name}, does not authenticate`,
+          });
+          reportedEmpty = true;
+        }
+        // continue: another variable may still inherit a usable value
+      } else if (typeof value === 'string' && value.length > 0) {
+        sources.push({
+          kind: 'process.env',
+          masked: maskKey(value),
+          describe: `${name} in the gateway process environment`,
+        });
+        break; // usable inherited credential — stop at the first
+      }
     }
   }
   // OAuth login state is only a fallback signal: check it last and do not

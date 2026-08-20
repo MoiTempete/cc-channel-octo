@@ -254,8 +254,14 @@ export function configureFromClaude(
         globalExisting.sdk && typeof globalExisting.sdk === 'object' && !Array.isArray(globalExisting.sdk)
           ? (globalExisting.sdk as Record<string, unknown>)
           : {}
-      if (typeof gsdk.anthropicBaseUrl === 'string' && (gsdk.anthropicBaseUrl as string).length > 0) baseUrlConflict = true
-      if (typeof gsdk.apiKey === 'string' && (gsdk.apiKey as string).length > 0) keyConflict = true
+      // Gate on the SAME imported variables as the local checks (R7): a global
+      // anthropicBaseUrl with no imported base URL shadows nothing.
+      if (
+        imported.ANTHROPIC_BASE_URL !== undefined &&
+        typeof gsdk.anthropicBaseUrl === 'string' &&
+        (gsdk.anthropicBaseUrl as string).length > 0
+      ) baseUrlConflict = true
+      if (importedKey !== undefined && typeof gsdk.apiKey === 'string' && (gsdk.apiKey as string).length > 0) keyConflict = true
     } catch {
       // keep the per-file result when the global config is unreadable
     }

@@ -163,15 +163,17 @@ describe('doctorReport', () => {
     expect(report.text).toContain('declared but EMPTY')
     expect(report.text).toContain('verdict: UNKNOWN (no usable auth source)')
   })
-  it('R6 B4: an empty config credential hides an inherited fallback from the summary', () => {
-    // Same shape as the reviewer's repro: config declares "" + a REAL inherited
-    // ANTHROPIC_AUTH_TOKEN. The empty config value shadows it at runtime, so
-    // attribution stays on config.env(empty) and the bot is missing.
+  it('R7 B5: an empty declared credential does NOT hide a DIFFERENT inherited credential', () => {
+    // buildSdkEnv spreads per variable: ANTHROPIC_API_KEY: "" shadows only
+    // ANTHROPIC_API_KEY; an inherited ANTHROPIC_AUTH_TOKEN still reaches the
+    // subprocess and authenticates. The empty shadow is surfaced, the verdict
+    // is OK (exit 0), and the inherited source is reported.
     writeGlobal([{ id: 'default' }], { sdk: { env: { ANTHROPIC_API_KEY: '' } } })
     writeBot('default', { botToken: 'bf_abcDEF123456' })
     const report = doctorReport(cfgPath, { ANTHROPIC_AUTH_TOKEN: 'sk-inherited-token' }, NO_CREDS)
-    expect(report.missing).toBe(1)
-    expect(report.text).not.toContain('process.env')
+    expect(report.missing).toBe(0)
+    expect(report.text).toContain('declared but EMPTY') // shadow surfaced
+    expect(report.text).toContain('process.env') // inherited token reported
   })
 
   it('treats an empty legacy default/config.json as idle, not a broken bot', () => {

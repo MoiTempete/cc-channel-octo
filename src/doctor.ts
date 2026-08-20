@@ -373,7 +373,9 @@ export function doctorReport(
   const procCredential =
     env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.CLAUDE_CODE_OAUTH_TOKEN;
   lines.push('environment');
-  lines.push(`  credential env (API_KEY/AUTH_TOKEN/OAUTH_TOKEN): ${procCredential ? `${maskKey(procCredential)} (inherited into the SDK subprocess)` : 'unset'}`);
+  // "(present in gateway env)" rather than "(inherited into the SDK
+  // subprocess)": a declared sdk.env value may shadow this variable there (R7).
+  lines.push(`  credential env (API_KEY/AUTH_TOKEN/OAUTH_TOKEN): ${procCredential ? `${maskKey(procCredential)} (present in gateway env)` : 'unset'}`);
   lines.push(`  ANTHROPIC_BASE_URL: ${env.ANTHROPIC_BASE_URL ? displayBaseUrl(env.ANTHROPIC_BASE_URL) : 'unset'}`);
   lines.push(`  ANTHROPIC_MODEL   : ${env.ANTHROPIC_MODEL ?? 'unset'}`);
   lines.push(`  OAuth login file  : ${credentialsPath} — ${existsSync(credentialsPath) ? 'present' : 'absent (macOS Keychain login is not statically detectable)'}`);
