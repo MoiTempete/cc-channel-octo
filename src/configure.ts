@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync, renameSy
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { DEFAULT_CONFIG_PATH } from './config.js'
+import { displayBaseUrl } from './auth-detect.js'
 import { isAllowedApiUrl } from './url-policy.js'
 
 /** Default Claude Code user settings file (the `env` block is what we import). */
@@ -108,9 +109,15 @@ function readExisting(path: string): Record<string, unknown> {
 function writeAtomic(path: string, merged: Record<string, unknown>): void {
   // 0700 on CREATED directories, not the ambient-umask default (R5 P2-9): the
   // 0600 file is useless if a co-located user can rename it away via a
-  // group/other-writable directory. Note: mode applies only when the directory
-  // is created — a PRE-EXISTING group/other-writable parent is not repaired.
+  // group/other-writable directory. Tighten a PRE-EXISTING parent too (R6):
+  // an install that already has ~/.cc-channel-octo at 0755 keeps its exposure
+  // otherwise. Best-effort — a failure to tighten must not block the write.
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(dirname(path), 0o700)
+  } catch {
+    /* existing dir we cannot tighten — write proceeds */
+  }
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   try {
     writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
@@ -198,15 +205,16 @@ export function configureFromClaude(
       `configure --from-claude: no ANTHROPIC_* / CLAUDE_CODE_* env vars in ${claudeSettingsPath}`,
     )
   }
-  // Every imported endpoint variable (ANTHROPIC_BASE_URL, *_BASE_URL, *_URL)
-  // reaches the SDK subprocess and receives the API key + all traffic, so each
-  // gets the SAME SSRF policy as configure --gateway-url and loadConfig's
-  // anthropicBaseUrl check. The source is the operator's own settings file, but
-  // a hand-typed http://169.254.169.254 is still a mistake.
+  // Every imported value that LOOKS like an http(s) endpoint reaches the SDK
+  // subprocess and receives the API key + all traffic, so each gets the SAME
+  // SSRF policy as configure --gateway-url and loadConfig's anthropicBaseUrl
+  // check. Validated BY VALUE (R6): name-based patterns miss FOO2_URL and
+  // non-*_URL endpoint vars. The rejection message prints the host only —
+  // never userinfo embedded in the URL (R6).
   for (const [key, value] of Object.entries(imported)) {
-    if (/(?:^|_)[A-Z]+_URL$/.test(key) && !isAllowedApiUrl(value)) {
+    if (/^https?:\/\//i.test(value) && !isAllowedApiUrl(value)) {
       throw new Error(
-        `configure --from-claude: unsafe ${key}=${value} in ${claudeSettingsPath} ` +
+        `configure --from-claude: unsafe ${key}=${displayBaseUrl(value)} in ${claudeSettingsPath} ` +
         `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
       )
     }
@@ -229,7 +237,8 @@ export function configureFromClaude(
   // P2-2: buildSdkEnv layers sdk.apiKey AFTER sdk.env, so a key written by an
   // earlier `configure --gateway-url --api-key` silently shadows an imported
   // token — warn symmetrically with baseUrlConflict. Same global-config check.
-  const importedKey = imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN
+  const importedKey =
+    imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN ?? imported.CLAUDE_CODE_OAUTH_TOKEN
   let baseUrlConflict =
     // Non-empty only (R6): a cleared `--api-key ""` (or empty base URL) does
     // not shadow anything at runtime — buildSdkEnv skips falsy values.

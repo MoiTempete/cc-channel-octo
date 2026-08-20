@@ -282,7 +282,8 @@ resolve `dist/cli.js` for you):
 
 - **`cc-channel-octo doctor`** — static diagnosis (no network): per-bot verdict,
   auth sources with masked keys, config file permissions, environment. Exit 0
-  when every bot has a source, 1 otherwise.
+  when every bot has a usable source, 1 otherwise (an uninitialized install —
+  no config file — is treated as idle and exits 0; a corrupt config exits 1).
 - **`cc-channel-octo configure --gateway-url <url> --api-key <key>`** — writes
   `sdk.anthropicBaseUrl` + `sdk.apiKey` with mode 600 (atomic temp+rename). Add
   `--bot <id>` to write a per-bot config instead of the global one. The command

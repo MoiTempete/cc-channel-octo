@@ -18,6 +18,7 @@ import {
   detectAuthSources,
   hasUsableAuthSource,
   maskKey,
+  displayBaseUrl,
   KEY_ENV_VARS,
   DEFAULT_CREDENTIALS_PATH,
   type SdkAuthInput,
@@ -58,20 +59,6 @@ function permissionNote(mode: string | null): string {
   return groupOrOther ? ' (WARNING: group/other readable — fix with chmod 600)' : '';
 }
 
-/**
- * Display a base URL without credentials: doctor prints ANTHROPIC_BASE_URL
- * verbatim while --from-claude masks the same variable — a URL with userinfo
- * (https://user:token@host) would leak its credential into scrollback. Strip
- * userinfo and path, keep scheme://host (masked when unparseable).
- */
-export function displayBaseUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.protocol}//${u.host}`;
-  } catch {
-    return maskKey(url);
-  }
-}
 
 /** One bot entry as the runtime sees it: global → inline bots[] → per-bot file. */
 export interface DoctorBotEntry {

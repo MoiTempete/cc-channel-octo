@@ -15,18 +15,19 @@ beforeEach(() => {
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 describe('maskKey', () => {
-  it('masks the middle of a long key, keeping first 5 + last 4', () => {
-    expect(maskKey('sk-ihDN61JfoXyZa')).toBe('sk-ih****XyZa') // 16 chars
-    expect(maskKey('sk-ihDN61JfoXyZ')).toBe('****') // 15 chars: 9 visible = 60% boundary
-    expect(maskKey('sk-ihDN61JfoXy')).toBe('****') // 14 chars: 9 visible > 60%
+  it('proportional visibility: ~30% of code points, capped at 9', () => {
+    expect(maskKey('sk-ihDN61JfoXyZa')).toBe('sk****Za') // 16 chars → 4 visible
+    expect(maskKey('sk-ihDN61JfoXyZ')).toBe('sk****yZ') // 15 chars → 4 visible
+    expect(maskKey('sk-ihDN61JfoXy')).toBe('sk****Xy') // 14 chars → 4 visible
+    expect(maskKey('sk-ihDN61JfoXyZaBcDeFgHiJ')).toBe('sk-i****HiJ') // 23 chars → 6 visible
   })
-  it('fully masks short/empty values (would leak most of the value)', () => {
+  it('fully masks short/empty values (fewer than 4 visible chars)', () => {
     expect(maskKey('')).toBe('****')
     expect(maskKey(undefined)).toBe('****')
     expect(maskKey('short')).toBe('****')
     expect(maskKey('sk-ihDN61Jfo')).toBe('****') // 12 chars
     expect(maskKey('sk-ihDN61Jf')).toBe('****')
-    expect(maskKey('sk-13def1b10d7')).toBe('****') // 15 chars: boundary
+    expect(maskKey('sk-13def1b10d7')).toBe('sk****d7') // 14 chars: 4 visible
   })
 })
 
@@ -34,7 +35,7 @@ describe('detectAuthSources', () => {
   it('reports config.apiKey with a mask (highest precedence)', () => {
     const sources = detectAuthSources({ apiKey: 'sk-abcDEF12345678', env: { ANTHROPIC_API_KEY: 'sk-other' } }, {}, NO_CREDS)
     expect(sources.map((s) => s.kind)).toEqual(['config.apiKey'])
-    expect(sources[0].masked).toBe('sk-ab****5678')
+    expect(sources[0].masked).toBe('sk-****78')
   })
   it('falls back to sdk.env.ANTHROPIC_API_KEY', () => {
     const sources = detectAuthSources({ env: { ANTHROPIC_API_KEY: 'sk-env-key' } }, {}, NO_CREDS)

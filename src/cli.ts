@@ -18,7 +18,7 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process';
-import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
+import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -304,8 +304,14 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean, procId: Pro
   // 0600, not the 0666 open() default: agent error text (R5 P2-8) can carry
   // secret-adjacent content (e.g. a gateway echoing the offending key) and
   // must not land group/other-readable while config.ts warns about exactly
-  // this for config files.
+  // this for config files. Also tighten a PRE-EXISTING log (R6: the mode
+  // only applies at creation, so upgrades keep the 0644 file otherwise).
   const fd = openSync(paths.logFile, 'a', 0o600);
+  try {
+    chmodSync(paths.logFile, 0o600);
+  } catch {
+    /* best-effort */
+  }
   const child = spawn(process.execPath, [paths.indexEntry], {
     detached: true,
     stdio: ['ignore', fd, fd],
@@ -522,7 +528,9 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
     case 'configure': {
       // --bot becomes a path segment; reject ids that could escape baseDir
       // (same slug rule as config.ts resolveBotConfigs).
-      if (bot) {
+      // `bot !== undefined`, not truthiness: `--bot=` yields '' which would
+      // otherwise skip validation and silently retarget the GLOBAL config (R6).
+      if (bot !== undefined) {
         try {
           assertValidBotId(bot);
         } catch (err) {
@@ -542,7 +550,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
           );
           return 2;
         }
-        const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
+        const configPath = join(effBaseDir, ...(bot !== undefined ? [bot, 'config.json'] : ['config.json']));
         try {
           const { imported, skipped, baseUrlConflict, keyConflict } = configureFromClaude(
             DEFAULT_CLAUDE_SETTINGS_PATH,
@@ -599,7 +607,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
         );
         return 2;
       }
-      const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
+      const configPath = join(effBaseDir, ...(bot !== undefined ? [bot, 'config.json'] : ['config.json']));
       try {
         configure(gatewayUrl ?? '', resolvedApiKey, configPath, { model, apiUrl });
         console.log(

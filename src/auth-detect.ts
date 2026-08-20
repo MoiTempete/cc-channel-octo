@@ -49,21 +49,21 @@ export interface AuthSourceInfo {
 }
 
 /**
- * Mask a secret for logs/diagnosis: `sk-****Jfo` (first 5 + last 4 chars).
- * A fixed 9 visible chars is fine for long API keys but exposes most of a
- * short one (13 chars → 69%), so anything whose 9 visible chars would be
- * >= 60% of the value is fully masked instead (Octo-Q P2-2). Measured in
- * CODE POINTS (R5 P2-7): `String.length` counts UTF-16 units, so an astral
- * character would inflate the length and let a short secret through; slice
- * could also split a surrogate pair.
+ * Mask a secret for logs/diagnosis. Proportional visibility (R6): show at
+ * most ~30% of the code points (capped at 9), so a 16-char token exposes 4
+ * chars instead of 9 and a 13-char token exposes 3; anything that would show
+ * fewer than 4 chars is fully masked. Measured in CODE POINTS (R5 P2-7):
+ * `String.length` counts UTF-16 units, so an astral character would inflate
+ * the length and let a short secret through; slice could split a pair.
  */
 export function maskKey(key: string | undefined | null): string {
   if (!key) return '****';
   const units = [...key];
-  if (units.length <= 15) return '****'; // 9 visible >= 60% of 15
-  const head = units.slice(0, 5).join('');
-  const tail = units.slice(-4).join('');
-  return `${head}****${tail}`;
+  const visible = Math.min(9, Math.floor(units.length * 0.3));
+  if (visible < 4) return '****';
+  const head = Math.ceil(visible / 2);
+  const tail = Math.floor(visible / 2);
+  return `${units.slice(0, head).join('')}****${units.slice(-tail).join('')}`;
 }
 
 /**
@@ -175,6 +175,21 @@ export function hasUsableAuthSource(sources: AuthSourceInfo[]): boolean {
 }
 
 /**
+ * Display a base URL without credentials: doctor prints ANTHROPIC_BASE_URL
+ * while --from-claude masks the same variable — a URL with userinfo
+ * (https://user:token@host) would leak its credential into scrollback. Strip
+ * userinfo and path, keep scheme://host (masked when unparseable).
+ */
+export function displayBaseUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return maskKey(url);
+  }
+}
+
+/**
  * Classify an agent-turn error (the Error thrown by the SDK stream, as
  * surfaced by stream-relay / queryAgent) as an authentication failure or not.
  * The literal "Not logged in" comes from the bundled Claude Code CLI in the
@@ -194,5 +209,5 @@ export function isAuthError(err: unknown): boolean {
   // the owner to re-run setup for nothing. Covers the Anthropic API's
   // structured error strings: "invalid x-api-key" (401 JSON body),
   // "authentication_error" (error type), "401 Unauthorized", "401: ...".
-  return /not logged in|please run \/login|invalid api key|invalid x-api-key|authentication_error|authentication (failed|error|required)|api_error_status=(401|403|407)|401[:\s]+(unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
+  return /not logged in|please run \/login|invalid api key|invalid x-api-key|authentication_error|authentication (failed|error|required)|marker=(authentication_failed|oauth_org_not_allowed)|api_error_status=(401|403|407)|401[:\s]+(unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
 }

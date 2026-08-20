@@ -135,6 +135,55 @@ describe('queryAgent', () => {
     expect(chunks).toEqual([]);
   });
 
+  it('R6 P1-1: only AUTH-class assistant markers suppress content (table over SDKAssistantMessageError)', async () => {
+    // SDKAssistantMessageError is a 10-value union; max_output_tokens /
+    // rate_limit / overloaded assistant messages CARRY the model's real
+    // output and must be relayed, not dropped.
+    const NON_AUTH: Array<[string, boolean]> = [
+      ['max_output_tokens', true], // carries real (truncated) output — must relay
+      ['rate_limit', true],
+      ['overloaded', true],
+      ['billing_error', true],
+      ['model_not_found', true],
+      ['invalid_request', true],
+      ['server_error', true],
+      ['unknown', true],
+      ['authentication_failed', false], // auth class — suppress
+      ['oauth_org_not_allowed', false],
+    ];
+    for (const [marker, shouldRelay] of NON_AUTH) {
+      const stream = createMockStream([
+        { type: 'assistant', message: { content: [{ type: 'text', text: 'the answer' }] }, error: marker },
+        { type: 'result', subtype: 'success', is_error: false },
+      ]);
+      mockQuery.mockReturnValue(stream);
+      const chunks: string[] = [];
+      for await (const chunk of queryAgent('test', makeConfig())) {
+        chunks.push(chunk);
+      }
+      if (shouldRelay) {
+        expect(chunks).toEqual(['the answer'], `marker ${marker} must RELAY the output`);
+      } else {
+        expect(chunks).toEqual([], `marker ${marker} must be suppressed`);
+      }
+    }
+  });
+
+  it('R6 P1-1: the auth marker is carried into the throw when the result has no status/text', async () => {
+    // is_error with no api_error_status / result / errors → the marker is the
+    // only discriminator isAuthError can use.
+    const stream = createMockStream([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Not logged in' }] }, error: 'authentication_failed' },
+      { type: 'result', subtype: 'success', is_error: true },
+    ]);
+    mockQuery.mockReturnValue(stream);
+    await expect(async () => {
+      for await (const chunk of queryAgent('test', makeConfig())) {
+        void chunk;
+      }
+    }).rejects.toThrow('Claude Code returned an error result: success (marker=authentication_failed)');
+  });
+
   it('R5 P1-4: a success-subtype result with is_error THROWS (auth failures arrive this way)', async () => {
     const stream = createMockStream([
       { type: 'assistant', message: { content: [{ type: 'text', text: 'Invalid API key · Fix external API key' }] }, error: 'authentication_failed' },

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, chmodSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { doctorReport, listBotIds, runDoctor, displayBaseUrl } from '../doctor.js'
+import { doctorReport, listBotIds, runDoctor } from '../doctor.js'
+import { displayBaseUrl } from '../auth-detect.js'
 
 let dir: string
 let cfgPath: string
@@ -38,7 +39,7 @@ describe('doctorReport', () => {
     const report = doctorReport(cfgPath, {}, NO_CREDS)
     expect(report.missing).toBe(0)
     expect(report.text).toContain('verdict: OK')
-    expect(report.text).toContain('sk-to****alue') // masked, never the full key
+    expect(report.text).toContain('sk-****ue') // masked, never the full key
     expect(report.text).not.toContain('sk-topSecretValue')
   })
 
@@ -68,7 +69,7 @@ describe('doctorReport', () => {
     const report = doctorReport(cfgPath, {}, NO_CREDS)
     expect(report.missing).toBe(0)
     expect(report.text).toContain('(from global config)')
-    expect(report.text).toContain('sk-gl****tKey') // masked
+    expect(report.text).toContain('sk-****ey') // masked
     expect(report.text).not.toContain('sk-globalSecretKey')
   })
 
@@ -87,7 +88,7 @@ describe('doctorReport', () => {
     writeGlobal([{ id: 'default' }], { sdk: { env: { ANTHROPIC_AUTH_TOKEN: 'sk-globalAuthToken' } } })
     writeBot('default', { botToken: 'bf_abcDEF123456' })
     const report = doctorReport(cfgPath, {}, NO_CREDS)
-    expect(report.text).toContain('sdk: credential sk-gl****oken (base inherited by all bots)')
+    expect(report.text).toContain('sdk: credential sk-****en (base inherited by all bots)')
   })
 
   it('multi-bot: counts missing per bot and does not let a healthy sibling mask a broken one (P1-3)', () => {

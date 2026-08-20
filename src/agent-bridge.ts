@@ -212,6 +212,14 @@ export function buildSystemPrompt(
 const MAX_SYSTEM_PROMPT_CHARS = 100 * 1024;
 
 /**
+ * The SDKAssistantMessageError values that mark an AUTH failure. The union has
+ * ten values; the rest ('max_output_tokens', 'rate_limit', 'overloaded', …)
+ * ride on assistant messages that CARRY real output and must be relayed, not
+ * suppressed (R6 P1-1).
+ */
+const AUTH_ERROR_MARKERS = new Set(['authentication_failed', 'oauth_org_not_allowed']);
+
+/**
  * Query Claude Agent SDK with structural role separation.
  *
  * - userMessage is passed as the SDK `prompt` (user role).
@@ -359,6 +367,10 @@ export async function* queryAgent(
     emitted: { any: boolean },
   ): AsyncIterable<string> {
     let reportedSessionId = false;
+    // Auth marker captured from a suppressed assistant block; appended to the
+    // thrown error so isAuthError can classify a result that carries is_error
+    // but no status/text (R6 P1-1, second half).
+    let authMarker: string | undefined;
     try {
       for await (const message of s) {
         if (!reportedSessionId && opts?.onSessionId) {
@@ -375,13 +387,18 @@ export async function* queryAgent(
         if (message.type === 'assistant') {
           // R5 P1-4: SDK auth failures arrive as an ORDINARY assistant text
           // block ("Not logged in · Please run /login") BEFORE a result with
-          // is_error — if we relay it, the raw error is streamed to the IM
-          // channel (including groups) and only afterwards does the catch
-          // append the neutral reply: two contradictory messages, and the
-          // "never echo the raw error" comment violated. An assistant message
-          // carrying `error` (SDKAssistantMessageError) is that API-error
-          // marker — skip its text entirely; the throw below owns the reply.
-          if ((message as { error?: unknown }).error !== undefined) {
+          // is_error — relaying it would stream the raw error to the channel.
+          // BUT SDKAssistantMessageError is a 10-value union (R6 P1-1):
+          // only the AUTH class marks an API-error block that must be
+          // suppressed — 'max_output_tokens' / 'rate_limit' / 'overloaded'
+          // assistant messages CARRY the model's real output, and dropping
+          // them silently discards a legitimate answer. Capture the auth
+          // marker for the throw below (when a result carries is_error with
+          // no status/text, the marker is the only discriminator) and relay
+          // everything else normally.
+          const assistantError = (message as { error?: unknown }).error;
+          if (typeof assistantError === 'string' && AUTH_ERROR_MARKERS.has(assistantError)) {
+            authMarker = assistantError;
             continue;
           }
           // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
@@ -431,6 +448,7 @@ export async function* queryAgent(
           if (resultMsg.subtype !== 'success' || resultMsg.is_error === true) {
             const status = resultMsg.api_error_status;
             const statusPart = status !== undefined && status !== null ? ` (api_error_status=${status})` : '';
+            const markerPart = authMarker !== undefined ? ` (marker=${authMarker})` : '';
             const errors = Array.isArray(resultMsg.errors) ? resultMsg.errors.filter((e): e is string => typeof e === 'string') : [];
             const resultText = typeof resultMsg.result === 'string' ? resultMsg.result : '';
             const detail = errors.length > 0
@@ -439,7 +457,7 @@ export async function* queryAgent(
                 ? `: ${resultText.slice(0, 500)}`
                 : '';
             throw new Error(
-              `Claude Code returned an error result: ${String(resultMsg.subtype ?? 'error')}${detail}${statusPart}`,
+              `Claude Code returned an error result: ${String(resultMsg.subtype ?? 'error')}${detail}${statusPart}${markerPart}`,
             );
           }
         } else if (
