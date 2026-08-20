@@ -76,6 +76,11 @@ describe('isAuthError', () => {
     expect(isAuthError(new Error('authentication_error: invalid credentials'))).toBe(true)
     expect(isAuthError(new Error('status code 401: unauthorized'))).toBe(true)
   })
+  it('matches the agent-bridge structured result error (api_error_status)', () => {
+    expect(isAuthError(new Error('Claude Code returned an error result: error_during_execution (api_error_status=401)'))).toBe(true)
+    expect(isAuthError(new Error('Claude Code returned an error result: error_connecting (api_error_status=403)'))).toBe(true)
+    expect(isAuthError(new Error('Claude Code returned an error result: error_during_execution (api_error_status=429)'))).toBe(false)
+  })
   it('does NOT match bare generic words (a tool call inside the agent may hit a 401)', () => {
     expect(isAuthError(new Error('tool api returned 401'))).toBe(false)
     expect(isAuthError(new Error('authentication service is down'))).toBe(false)

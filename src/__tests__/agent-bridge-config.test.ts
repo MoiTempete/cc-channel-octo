@@ -105,4 +105,25 @@ describe('queryAgent SDK configuration forwarding', () => {
     const options = mockQuery.mock.calls[0][0].options;
     expect(options.allowedTools).toEqual(['Read']);
   });
+
+  it('P1-C: a non-success result THROWS a structured error (not a yielded marker)', async () => {
+    // The auth-error UX in handleMessage only fires if the stream throws with
+    // an identifiable message. A non-success result must throw, carrying the
+    // subtype + api_error_status, instead of yielding "[Error: subtype]" which
+    // completes the generator normally and never reaches handleMessage's catch.
+    mockQuery.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'result', subtype: 'error_during_execution', api_error_status: 401 };
+      },
+      close: vi.fn(),
+    });
+
+    const chunks: string[] = [];
+    await expect(async () => {
+      for await (const chunk of queryAgent('hello', makeConfig())) {
+        chunks.push(chunk);
+      }
+    }).rejects.toThrow('Claude Code returned an error result: error_during_execution (api_error_status=401)');
+    expect(chunks).toHaveLength(0); // nothing yielded — the reply comes from handleMessage's catch
+  });
 });

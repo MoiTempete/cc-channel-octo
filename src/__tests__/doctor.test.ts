@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, chmodSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { doctorReport, listBotIds, runDoctor } from '../doctor.js'
+import { doctorReport, listBotIds, runDoctor, displayBaseUrl } from '../doctor.js'
 
 let dir: string
 let cfgPath: string
@@ -192,34 +192,54 @@ describe('runDoctor exit code (structured, not substring search)', () => {
   it('returns 0 when every bot is healthy', () => {
     writeGlobal([{ id: 'default' }])
     writeBot('default', { botToken: 'bf_abcDEF123456', sdk: { apiKey: 'sk-healthyKey123' } })
-    expect(runDoctor(cfgPath, {})).toBe(0)
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(0)
   })
   it('returns 1 with a mixed healthy/unhealthy bot set (P1-3)', () => {
     writeGlobal([{ id: 'good' }, { id: 'bad' }])
     writeBot('good', { botToken: 'bf_abcDEF123456', sdk: { apiKey: 'sk-goodKey12345' } })
     writeBot('bad', { botToken: 'bf_abcDEF123456' })
-    expect(runDoctor(cfgPath, {})).toBe(1)
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(1)
   })
   it('returns 1 when the only bot is unhealthy', () => {
     writeGlobal([{ id: 'default' }])
     writeBot('default', { botToken: 'bf_abcDEF123456' })
-    expect(runDoctor(cfgPath, {})).toBe(1)
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(1)
   })
   it('returns 0 for an uninitialized install (idle is not an auth failure)', () => {
-    expect(runDoctor(join(dir, 'missing.json'), {})).toBe(0)
+    expect(runDoctor(join(dir, 'missing.json'), {}, NO_CREDS)).toBe(0)
   })
   it('returns 1 for the legacy top-level botToken shape without auth', () => {
     writeGlobal(undefined, { botToken: 'bf_abcDEF123456' })
-    expect(runDoctor(cfgPath, {})).toBe(1)
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(1)
   })
   it('returns 0 for an inline bots[].botToken + global sdk.apiKey, no per-bot dir', () => {
     writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalInlineKey' } })
-    expect(runDoctor(cfgPath, {})).toBe(0)
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(0)
   })
-  it('does not read the ambient process env (host ANTHROPIC_API_KEY must not flip the verdict)', () => {
+  it('does not read ambient host state (env OR ~/.claude credentials must not flip the verdict)', () => {
+    // The reviewer's host had a real ~/.claude/.credentials.json, which
+    // detectAuthSources picked up through the hard-wired DEFAULT_CREDENTIALS_PATH
+    // and flipped these verdicts. credentialsPath is now injectable (P1-A).
     writeGlobal([{ id: 'default' }])
     writeBot('default', { botToken: 'bf_abcDEF123456' })
-    expect(runDoctor(cfgPath, {})).toBe(1) // env is injected as {} — no inherited key
+    expect(runDoctor(cfgPath, {}, NO_CREDS)).toBe(1)
+  })
+  it('still honors an EXPLICIT oauth-file credential when the bot has nothing else', () => {
+    writeGlobal([{ id: 'default' }])
+    writeBot('default', { botToken: 'bf_abcDEF123456' })
+    const creds = join(dir, '.credentials.json')
+    writeFileSync(creds, '{"token":"x"}', { mode: 0o600 })
+    expect(runDoctor(cfgPath, {}, creds)).toBe(0)
+  })
+})
+
+describe('displayBaseUrl', () => {
+  it('strips userinfo and path, keeping scheme://host (no credential leak)', () => {
+    expect(displayBaseUrl('https://user:token@gw.example.com/v1')).toBe('https://gw.example.com')
+    expect(displayBaseUrl('https://api.deepseek.com/anthropic')).toBe('https://api.deepseek.com')
+  })
+  it('masks an unparseable URL entirely', () => {
+    expect(displayBaseUrl('not a url')).toBe('****')
   })
 })
 

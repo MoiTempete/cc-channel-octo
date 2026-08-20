@@ -285,11 +285,13 @@ resolve `dist/cli.js` for you):
   when every bot has a source, 1 otherwise.
 - **`cc-channel-octo configure --gateway-url <url> --api-key <key>`** — writes
   `sdk.anthropicBaseUrl` + `sdk.apiKey` with mode 600 (atomic temp+rename). Add
-  `--bot <id>` to write a per-bot config instead of the global one. Omit
-  `--api-key` to take the key from `CC_OCTO_CONFIGURE_API_KEY` or
-  `ANTHROPIC_API_KEY` (the chosen source is printed), or leave it out entirely
-  on a TTY to be prompted (hidden input) — the key never appears in `argv`, so
-  nothing lands in shell history or `ps`.
+  `--bot <id>` to write a per-bot config instead of the global one. Without
+  `--api-key` the key is taken from `CC_OCTO_CONFIGURE_API_KEY` (explicit
+  opt-in); an ambient `ANTHROPIC_API_KEY` is only persisted after an explicit
+  `y` on a TTY (never off-TTY — "set the gateway URL" alone writes no secret);
+  otherwise you are prompted with hidden input. The key never appears in
+  `argv`, so nothing lands in shell history or `ps`; pressing Ctrl+C at the
+  prompt cancels cleanly (exit 130) and writes nothing.
 - **`cc-channel-octo configure --from-claude [--bot <id>]`** — the one-command
   answer for third-party LLM API users: copies the `env` block of
   `~/.claude/settings.json` (token + base URL + model mapping — `ANTHROPIC_*` /

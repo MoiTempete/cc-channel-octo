@@ -116,17 +116,22 @@ describe('queryAgent', () => {
     expect(chunks).toEqual(['Only this']);
   });
 
-  it('yields error message on non-success result', async () => {
+  it('P1-C: throws a structured error on a non-success result (so handleMessage can classify it)', async () => {
+    // Was: yields "\n[Error: error]" — the generator completed normally and
+    // handleMessage's catch (the auth-error UX) was unreachable. Now it throws
+    // with subtype + api_error_status.
     const stream = createMockStream([
-      { type: 'result', subtype: 'error' },
+      { type: 'result', subtype: 'error', api_error_status: 401 },
     ]);
     mockQuery.mockReturnValue(stream);
 
     const chunks: string[] = [];
-    for await (const chunk of queryAgent('test', makeConfig())) {
-      chunks.push(chunk);
-    }
-    expect(chunks).toEqual(['\n[Error: error]']);
+    await expect(async () => {
+      for await (const chunk of queryAgent('test', makeConfig())) {
+        chunks.push(chunk);
+      }
+    }).rejects.toThrow('Claude Code returned an error result: error (api_error_status=401)');
+    expect(chunks).toEqual([]);
   });
 
   it('does not yield error for success result', async () => {

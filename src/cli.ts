@@ -49,10 +49,14 @@ export function readHiddenSecret(prompt: string): Promise<string> {
       // Scan BYTE by byte: a paste arrives as ONE chunk, so strict whole-chunk
       // equality against '\n'/'\r' would swallow the trailing newline into the
       // secret (an opaque 401 later). Handle control bytes individually and
-      // drop bracketed-paste escape sequences (ESC [ 2 0 0 ~ ...) entirely.
+      // drop escape sequences entirely: CSI ends on ANY byte in 0x40–0x7e
+      // (arrows are ESC [ A/B/C/D, Home/End are ESC [ H/F) — treating only '~'
+      // as the terminator would latch inEscape forever on one arrow key, after
+      // which even Enter/Ctrl+C get swallowed and the prompt hangs (reproduced
+      // under a real PTY).
       for (const byte of chunk) {
         if (inEscape) {
-          if (byte === 0x7e) inEscape = false; // '~' ends a CSI sequence
+          if (byte >= 0x40 && byte <= 0x7e) inEscape = false; // CSI terminator
           continue;
         }
         if (byte === 0x1b) { inEscape = true; continue; } // ESC
@@ -640,6 +644,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
           const { imported, skipped, baseUrlConflict } = configureFromClaude(
             DEFAULT_CLAUDE_SETTINGS_PATH,
             configPath,
+            join(effBaseDir, 'config.json'),
           );
           console.log(
             `cc-channel-octo: imported ${Object.keys(imported).length} env var(s) from ${DEFAULT_CLAUDE_SETTINGS_PATH} ` +
@@ -684,7 +689,15 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
       }
       if (!resolvedApiKey && stdin.isTTY) {
         resolvedApiKey = await readHiddenSecret('API key (hidden): ');
-        if (resolvedApiKey) keySource = 'interactive prompt';
+        if (resolvedApiKey) {
+          keySource = 'interactive prompt';
+        } else {
+          // Empty interactive input = deliberate cancel (Ctrl+C / bare Enter),
+          // not a missing-argument mistake. Report it as a cancel, exit 130
+          // (128 + SIGINT) and write nothing.
+          console.log('cc-channel-octo: cancelled');
+          return 130;
+        }
       }
       const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
       try {

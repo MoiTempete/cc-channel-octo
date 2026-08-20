@@ -13,7 +13,7 @@
  * unit-testable, mirroring buildSdkEnv's injectable style.
  */
 
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,16 +111,19 @@ export function detectAuthSources(
     }
   }
   // OAuth login state is only a fallback signal: check it last and do not
-  // let it shadow an explicitly configured key.
+  // let it shadow an explicitly configured key. A real login file is a
+  // non-empty regular file — an empty file, a directory, or an unreadable
+  // stub must not count as authentication.
   try {
-    if (existsSync(credentialsPath)) {
+    const st = statSync(credentialsPath);
+    if (st.isFile() && st.size > 0) {
       sources.push({
         kind: 'oauth-file',
         describe: `host Claude Code login file ${credentialsPath}`,
       });
     }
   } catch {
-    /* unreadable path — treat as absent */
+    /* absent or unreadable — treat as no OAuth login */
   }
   return sources;
 }
@@ -141,5 +144,5 @@ export function isAuthError(err: unknown): boolean {
   // the owner to re-run setup for nothing. Covers the Anthropic API's
   // structured error strings: "invalid x-api-key" (401 JSON body),
   // "authentication_error" (error type), "401 Unauthorized", "401: ...".
-  return /not logged in|please run \/login|invalid api key|invalid x-api-key|authentication_error|authentication (failed|error|required)|401[:\s]+(unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
+  return /not logged in|please run \/login|invalid api key|invalid x-api-key|authentication_error|authentication (failed|error|required)|api_error_status=(401|403|407)|401[:\s]+(unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
 }

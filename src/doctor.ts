@@ -55,6 +55,21 @@ function permissionNote(mode: string | null): string {
   return groupOrOther ? ' (WARNING: group/other readable — fix with chmod 600)' : '';
 }
 
+/**
+ * Display a base URL without credentials: doctor prints ANTHROPIC_BASE_URL
+ * verbatim while --from-claude masks the same variable — a URL with userinfo
+ * (https://user:token@host) would leak its credential into scrollback. Strip
+ * userinfo and path, keep scheme://host (masked when unparseable).
+ */
+export function displayBaseUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return maskKey(url);
+  }
+}
+
 /** One bot entry as the runtime sees it: global → inline bots[] → per-bot file. */
 export interface DoctorBotEntry {
   id: string;
@@ -337,7 +352,7 @@ export function doctorReport(
   const procCredential = env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN;
   lines.push('environment');
   lines.push(`  ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: ${procCredential ? `${maskKey(procCredential)} (inherited into the SDK subprocess)` : 'unset'}`);
-  lines.push(`  ANTHROPIC_BASE_URL: ${env.ANTHROPIC_BASE_URL ?? 'unset'}`);
+  lines.push(`  ANTHROPIC_BASE_URL: ${env.ANTHROPIC_BASE_URL ? displayBaseUrl(env.ANTHROPIC_BASE_URL) : 'unset'}`);
   lines.push(`  ANTHROPIC_MODEL   : ${env.ANTHROPIC_MODEL ?? 'unset'}`);
   lines.push(`  OAuth login file  : ${credentialsPath} — ${existsSync(credentialsPath) ? 'present' : 'absent (macOS Keychain login is not statically detectable)'}`);
   lines.push('');
@@ -359,13 +374,22 @@ export function doctorReport(
 }
 
 /**
- * Run doctor: print the report, return the process exit code. Env is
- * injectable so tests never read the ambient process environment (a developer
- * machine exporting ANTHROPIC_API_KEY must not flip the verdict).
+ * Run doctor: print the report, return the process exit code. Env AND the OAuth
+ * credentials path are injectable so tests never read ambient host state (a
+ * developer machine with ANTHROPIC_API_KEY exported or a real
+ * ~/.claude/.credentials.json must not flip the verdict).
  */
-export function runDoctor(configPath?: string, baseEnv?: NodeJS.ProcessEnv): number {
+export function runDoctor(
+  configPath?: string,
+  baseEnv?: NodeJS.ProcessEnv,
+  credentialsPath?: string,
+): number {
   const path = configPath ?? DEFAULT_CONFIG_PATH;
-  const report = doctorReport(path, baseEnv ?? process.env, DEFAULT_CREDENTIALS_PATH);
+  const report = doctorReport(
+    path,
+    baseEnv ?? process.env,
+    credentialsPath ?? DEFAULT_CREDENTIALS_PATH,
+  );
   console.log(report.text);
   // Exit code comes from the structured `missing` count — never from parsing
   // the report text (a healthy bot's per-bot "verdict: OK" would mask a broken

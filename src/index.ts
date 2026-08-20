@@ -1074,16 +1074,21 @@ export async function handleMessage(
         const taskId = msg.message_id.split(':')[1];
         console.error(`[cc-channel-octo] cron: fired task ${taskId} failed during execution: ${String(err)}`);
       }
-      // Best-effort error reply
+      // Best-effort error reply. Setup guidance goes to the owner ONLY in a DM
+      // (a group reply would show operational detail to everyone in the room);
+      // everyone else — and the owner in a group — gets the neutral message.
       try {
-        const isOwner = router.getOwnerUid() !== '' && msg.from_uid === router.getOwnerUid();
+        const isOwnerDm =
+          channelType === ChannelType.DM &&
+          router.getOwnerUid() !== '' &&
+          msg.from_uid === router.getOwnerUid();
         await sendMessage({
           apiUrl: config.apiUrl,
           botToken: config.botToken,
           channelId,
           channelType,
           content: authError
-            ? isOwner
+            ? isOwnerDm
               ? '⚠️ The bot is not authenticated with Claude (the agent reported "Not logged in"). ' +
                 'Please run `npm run setup` (source) / `cc-channel-octo configure --from-claude` (global) ' +
                 'and restart the gateway. Run `npm run doctor` / `cc-channel-octo doctor` for a diagnosis.'

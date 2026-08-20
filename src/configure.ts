@@ -150,6 +150,7 @@ export interface FromClaudeResult {
 export function configureFromClaude(
   claudeSettingsPath: string,
   configPath: string,
+  globalConfigPath?: string,
 ): FromClaudeResult {
   if (!existsSync(claudeSettingsPath)) {
     throw new Error(
@@ -187,16 +188,18 @@ export function configureFromClaude(
       `configure --from-claude: no ANTHROPIC_* / CLAUDE_CODE_* env vars in ${claudeSettingsPath}`,
     )
   }
-  // The imported base URL reaches the SDK subprocess and receives the API key
-  // + all traffic, so it gets the SAME SSRF policy as configure --gateway-url
-  // and loadConfig's anthropicBaseUrl check. The source is the operator's own
-  // settings file, but a hand-typed http://169.254.169.254 is still a mistake.
-  const importedBaseUrl = imported.ANTHROPIC_BASE_URL
-  if (importedBaseUrl !== undefined && !isAllowedApiUrl(importedBaseUrl)) {
-    throw new Error(
-      `configure --from-claude: unsafe ANTHROPIC_BASE_URL ${importedBaseUrl} in ${claudeSettingsPath} ` +
-      `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
-    )
+  // Every imported endpoint variable (ANTHROPIC_BASE_URL, *_BASE_URL, *_URL)
+  // reaches the SDK subprocess and receives the API key + all traffic, so each
+  // gets the SAME SSRF policy as configure --gateway-url and loadConfig's
+  // anthropicBaseUrl check. The source is the operator's own settings file, but
+  // a hand-typed http://169.254.169.254 is still a mistake.
+  for (const [key, value] of Object.entries(imported)) {
+    if (/(?:^|_)[A-Z]+_URL$/.test(key) && !isAllowedApiUrl(value)) {
+      throw new Error(
+        `configure --from-claude: unsafe ${key}=${value} in ${claudeSettingsPath} ` +
+        `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
+      )
+    }
   }
   const existing = readExisting(configPath)
   const existingSdk =
@@ -215,7 +218,21 @@ export function configureFromClaude(
   writeAtomic(configPath, merged)
   // sdk.anthropicBaseUrl (written by configure --gateway-url) is layered AFTER
   // sdk.env in buildSdkEnv, so it would silently shadow an imported base URL.
-  const baseUrlConflict =
+  // The shadow can come from the file being written OR from the global config
+  // (a per-bot write inherits the global sdk block at runtime).
+  let baseUrlConflict =
     typeof existingSdk.anthropicBaseUrl === 'string' && imported.ANTHROPIC_BASE_URL !== undefined
+  if (globalConfigPath !== undefined && globalConfigPath !== configPath) {
+    try {
+      const globalExisting = readExisting(globalConfigPath)
+      const gsdk =
+        globalExisting.sdk && typeof globalExisting.sdk === 'object' && !Array.isArray(globalExisting.sdk)
+          ? (globalExisting.sdk as Record<string, unknown>)
+          : {}
+      if (typeof gsdk.anthropicBaseUrl === 'string') baseUrlConflict = true
+    } catch {
+      // keep the per-file result when the global config is unreadable
+    }
+  }
   return { imported, skipped, baseUrlConflict }
 }

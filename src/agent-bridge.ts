@@ -400,7 +400,16 @@ export async function* queryAgent(
           }
         } else if (message.type === 'result') {
           if (message.subtype !== 'success') {
-            yield `\n[Error: ${message.subtype}]`;
+            // THROW instead of yielding "[Error: <subtype>]": a yielded string
+            // completes the generator normally, so handleMessage's catch (the
+            // auth-error UX path) is never reached and the IM user gets the
+            // raw marker. Include the structured api_error_status (401 etc.)
+            // so isAuthError can classify it without pattern-matching prose.
+            // Any already-yielded partial output was flushed by stream-relay
+            // before this point — that stays, the reply follows.
+            const status = (message as { api_error_status?: unknown }).api_error_status;
+            const statusPart = status !== undefined && status !== null ? ` (api_error_status=${status})` : '';
+            throw new Error(`Claude Code returned an error result: ${message.subtype}${statusPart}`);
           }
         } else if (
           message.type === 'system' &&

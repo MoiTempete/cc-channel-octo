@@ -1038,4 +1038,60 @@ describe('E2E smoke tests', () => {
       }),
     );
   });
+
+  // --- P1-C: auth-error UX is reachable and owner-scoped ---
+
+  function mockQueryThrowAuthError(): void {
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* () {
+        throw new Error(
+          'Claude Code returned an error result: error_during_execution (api_error_status=401)',
+        );
+      },
+    );
+  }
+
+  it('P1-C: owner in a DM gets setup guidance on an auth error', async () => {
+    // Router owner = USER_UID (registerBot.owner_uid), so this DM is from the owner.
+    const ownerRouter = new SessionRouter(config, BOT_ID, USER_UID);
+    mockQueryThrowAuthError();
+    const msg = makeDmMsg('hello');
+    await simulateMessage(msg, config, store, ownerRouter, groupContext, streamRelay);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('not authenticated with Claude'),
+      }),
+    );
+  });
+
+  it('P1-C: non-owner in a DM gets the neutral message, not setup guidance', async () => {
+    const ownerRouter = new SessionRouter(config, BOT_ID, USER_UID);
+    mockQueryThrowAuthError();
+    const msg = makeDmMsg('hello', { from_uid: 'user-999' });
+    await simulateMessage(msg, config, store, ownerRouter, groupContext, streamRelay);
+
+    const sent = sendMessage as ReturnType<typeof vi.fn>;
+    expect(sent).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'The bot is currently unavailable. Please try again later.' }),
+    );
+    expect(sent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('not authenticated') }),
+    );
+  });
+
+  it('P1-C: the owner in a GROUP still gets the neutral message (no operational detail in chat)', async () => {
+    const ownerRouter = new SessionRouter(config, BOT_ID, USER_UID);
+    mockQueryThrowAuthError();
+    const msg = makeGroupMsg('hello', true); // from USER_UID = the owner
+    await simulateMessage(msg, config, store, ownerRouter, groupContext, streamRelay);
+
+    const sent = sendMessage as ReturnType<typeof vi.fn>;
+    expect(sent).toHaveBeenCalledWith(
+      expect.objectContaining({ content: 'The bot is currently unavailable. Please try again later.' }),
+    );
+    expect(sent).not.toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining('not authenticated') }),
+    );
+  });
 });

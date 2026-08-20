@@ -139,6 +139,11 @@ describe('configureFromClaude', () => {
     writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' } }))
     expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).not.toThrow()
   })
+  it('applies the SSRF policy to ANY imported *_URL / *_BASE_URL var', () => {
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_VERTEX_BASE_URL: 'http://169.254.169.254' } }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/unsafe ANTHROPIC_VERTEX_BASE_URL/)
+    expect(existsSync(cfgPath)).toBe(false)
+  })
   it('flags baseUrlConflict when sdk.anthropicBaseUrl would shadow the imported base URL', () => {
     writeFileSync(cfgPath, JSON.stringify({ sdk: { anthropicBaseUrl: 'https://gw.example.com' } }))
     writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' } }))
