@@ -29,12 +29,13 @@ export function normalizeGatewayUrl(raw: string): string {
 
 export function configure(
   gatewayUrl: string,
-  apiKey: string,
+  apiKey?: string,
   configPath?: string,
   opts?: { model?: string; apiUrl?: string },
 ): void {
   if (!gatewayUrl) throw new Error('configure: --gateway-url is required')
-  if (!apiKey) throw new Error('configure: --api-key is required')
+  // undefined = not provided (P2-10); an explicit EMPTY string clears a key.
+  if (apiKey === undefined) throw new Error('configure: --api-key is required')
   // The gateway receives the API key + all prompt/response content, so it gets
   // the same SSRF policy as apiUrl (mirrors loadConfig's anthropicBaseUrl check).
   if (!isAllowedApiUrl(gatewayUrl)) {
@@ -102,7 +103,10 @@ function readExisting(path: string): Record<string, unknown> {
  * writer. The pid+timestamp name makes a real collision practically impossible.
  */
 function writeAtomic(path: string, merged: Record<string, unknown>): void {
-  mkdirSync(dirname(path), { recursive: true })
+  // 0700, not the ambient-umask default (R5 P2-9): the 0600 file is useless if
+  // a co-located user can rename it away via a group/other-writable directory
+  // and repoint anthropicBaseUrl at a host that receives the key + traffic.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   try {
     writeFileSync(tmpPath, JSON.stringify(merged, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
@@ -134,6 +138,8 @@ export interface FromClaudeResult {
   skipped: string[];
   /** True when sdk.anthropicBaseUrl (configure --gateway-url) would shadow the imported ANTHROPIC_BASE_URL. */
   baseUrlConflict?: boolean;
+  /** True when an existing sdk.apiKey (configure --api-key) shadows the imported ANTHROPIC_API_KEY / AUTH_TOKEN. */
+  keyConflict?: boolean;
 }
 
 /**
@@ -216,12 +222,13 @@ export function configureFromClaude(
     sdk: { ...existingSdk, env: { ...existingEnv, ...imported } },
   }
   writeAtomic(configPath, merged)
-  // sdk.anthropicBaseUrl (written by configure --gateway-url) is layered AFTER
-  // sdk.env in buildSdkEnv, so it would silently shadow an imported base URL.
-  // The shadow can come from the file being written OR from the global config
-  // (a per-bot write inherits the global sdk block at runtime).
+  // P2-2: buildSdkEnv layers sdk.apiKey AFTER sdk.env, so a key written by an
+  // earlier `configure --gateway-url --api-key` silently shadows an imported
+  // token — warn symmetrically with baseUrlConflict. Same global-config check.
+  const importedKey = imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN
   let baseUrlConflict =
     typeof existingSdk.anthropicBaseUrl === 'string' && imported.ANTHROPIC_BASE_URL !== undefined
+  let keyConflict = typeof existingSdk.apiKey === 'string' && importedKey !== undefined
   if (globalConfigPath !== undefined && globalConfigPath !== configPath) {
     try {
       const globalExisting = readExisting(globalConfigPath)
@@ -230,9 +237,10 @@ export function configureFromClaude(
           ? (globalExisting.sdk as Record<string, unknown>)
           : {}
       if (typeof gsdk.anthropicBaseUrl === 'string') baseUrlConflict = true
+      if (typeof gsdk.apiKey === 'string') keyConflict = true
     } catch {
       // keep the per-file result when the global config is unreadable
     }
   }
-  return { imported, skipped, baseUrlConflict }
+  return { imported, skipped, baseUrlConflict, keyConflict }
 }

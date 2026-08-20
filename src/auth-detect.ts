@@ -13,7 +13,7 @@
  * unit-testable, mirroring buildSdkEnv's injectable style.
  */
 
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -44,12 +44,18 @@ export interface AuthSourceInfo {
  * Mask a secret for logs/diagnosis: `sk-****Jfo` (first 5 + last 4 chars).
  * A fixed 9 visible chars is fine for long API keys but exposes most of a
  * short one (13 chars → 69%), so anything whose 9 visible chars would be
- * >= 60% of the value is fully masked instead (Octo-Q P2-2).
+ * >= 60% of the value is fully masked instead (Octo-Q P2-2). Measured in
+ * CODE POINTS (R5 P2-7): `String.length` counts UTF-16 units, so an astral
+ * character would inflate the length and let a short secret through; slice
+ * could also split a surrogate pair.
  */
 export function maskKey(key: string | undefined | null): string {
   if (!key) return '****';
-  if (key.length <= 15) return '****'; // 9 visible >= 60% of 15
-  return `${key.slice(0, 5)}****${key.slice(-4)}`;
+  const units = [...key];
+  if (units.length <= 15) return '****'; // 9 visible >= 60% of 15
+  const head = units.slice(0, 5).join('');
+  const tail = units.slice(-4).join('');
+  return `${head}****${tail}`;
 }
 
 /**
@@ -69,7 +75,7 @@ export function maskKey(key: string | undefined | null): string {
  * --from-claude can import verbatim — counting it as a source keeps doctor's
  * verdict aligned with configs this PR itself can produce (Octo-Q P2-3).
  */
-const KEY_ENV_VARS = [
+export const KEY_ENV_VARS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN',
@@ -85,6 +91,12 @@ function firstEnvValue(env: Record<string, string | undefined> | undefined): str
   return undefined;
 }
 
+/** True when `env` declares ANY credential key, even with an empty value. */
+function envDeclaresCredential(env: Record<string, string | undefined> | undefined): boolean {
+  if (!env) return false;
+  return KEY_ENV_VARS.some((name) => Object.prototype.hasOwnProperty.call(env, name));
+}
+
 export function detectAuthSources(
   sdk: SdkAuthInput,
   baseEnv: NodeJS.ProcessEnv,
@@ -97,39 +109,45 @@ export function detectAuthSources(
       masked: maskKey(sdk.apiKey),
       describe: 'sdk.apiKey in config (forwarded as ANTHROPIC_API_KEY)',
     });
-  } else {
+  } else if (envDeclaresCredential(sdk.env)) {
+    // Model the buildSdkEnv overlay: sdk.env spreads OVER the process env, so
+    // a key declared in config — even with an empty value — SHADOWS the
+    // inherited one (R5 P2-1: an empty config value makes the subprocess
+    // unauthenticated; reporting process.env as the source would be wrong).
     const envKey = firstEnvValue(sdk.env);
-    if (envKey !== undefined) {
+    sources.push({
+      kind: 'config.env',
+      masked: envKey !== undefined ? maskKey(envKey) : '****',
+      describe: 'sdk.env.ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config',
+    });
+  } else {
+    const procKey = firstEnvValue(baseEnv as Record<string, string | undefined>);
+    if (procKey !== undefined) {
       sources.push({
-        kind: 'config.env',
-        masked: maskKey(envKey),
-        describe: 'sdk.env.ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in config',
+        kind: 'process.env',
+        masked: maskKey(procKey),
+        describe: 'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in the gateway process environment',
       });
-    } else {
-      const procKey = firstEnvValue(baseEnv as Record<string, string | undefined>);
-      if (procKey !== undefined) {
-        sources.push({
-          kind: 'process.env',
-          masked: maskKey(procKey),
-          describe: 'ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in the gateway process environment',
-        });
-      }
     }
   }
   // OAuth login state is only a fallback signal: check it last and do not
   // let it shadow an explicitly configured key. A real login file is a
-  // non-empty regular file — an empty file, a directory, or an unreadable
-  // stub must not count as authentication.
+  // non-empty JSON object — `{}`, a corrupt file, or an empty stub must not
+  // count as authentication (R5 P2-5).
   try {
     const st = statSync(credentialsPath);
     if (st.isFile() && st.size > 0) {
-      sources.push({
-        kind: 'oauth-file',
-        describe: `host Claude Code login file ${credentialsPath}`,
-      });
+      const parsed: unknown = JSON.parse(readFileSync(credentialsPath, 'utf-8'));
+      const isObject = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+      if (isObject && Object.keys(parsed as Record<string, unknown>).length > 0) {
+        sources.push({
+          kind: 'oauth-file',
+          describe: `host Claude Code login file ${credentialsPath}`,
+        });
+      }
     }
   } catch {
-    /* absent or unreadable — treat as no OAuth login */
+    /* absent, unreadable, or not a credentials JSON — treat as no OAuth login */
   }
   return sources;
 }
@@ -144,6 +162,10 @@ export function detectAuthSources(
  */
 export function isAuthError(err: unknown): boolean {
   const m = err instanceof Error ? err.message : String(err);
+  // R5 P2-6: the handleMessage catch also spans the Octo API (its errors are
+  // "Octo API <path> failed (<status>): <body>") — a server-side 401 body
+  // containing "authentication failed" must not be blamed on Claude.
+  if (/^Octo API\b/.test(m)) return false;
   // Anchor on the SDK subprocess's own signatures rather than bare words:
   // "authentication" or "401" alone appear in unrelated tool/service errors
   // (a skill's HTTP call, a MCP server), and misclassifying those would tell

@@ -295,10 +295,14 @@ resolve `dist/cli.js` for you):
   answer for third-party LLM API users: copies the `env` block of
   `~/.claude/settings.json` (token + base URL + model mapping — `ANTHROPIC_*` /
   `CLAUDE_CODE_*` vars) into the target config's `sdk.env`. Explicitly NOT an
-  auto-inherit: only this command reads your personal file, only the
-  `ANTHROPIC_*`/`CLAUDE_CODE_*` subset is copied (so unrelated personal env
-  stays out of the bot), the result is written with mode 600, and secret vars
-  print masked. Re-run it after changing `~/.claude/settings.json` to sync.
+  auto-inherit: only this command reads your personal file, the result is
+  written with mode 600, and secret vars print masked. The prefix filter is a
+  **privacy convenience, not a security boundary** — every imported `ANTHROPIC_*`
+  var (including Admin keys) reaches a subprocess running with
+  `bypassPermissions` + `allowedTools: "*"`, so review what your settings file
+  exposes before importing. Re-running imports ADDITIVELY: a variable removed
+  from `~/.claude/settings.json` is not pruned from `sdk.env` — remove it by
+  hand-editing the config.
 - **Boot preflight** — the gateway warns loudly at startup when a bot has no
   detectable source, instead of failing on the first message. It never blocks
   boot (a Keychain-only OAuth login is undetectable statically).

@@ -59,15 +59,33 @@ describe('detectAuthSources', () => {
     expect(sources.map((s) => s.kind)).toEqual(['process.env'])
   })
   it('reports the OAuth file when nothing else exists', () => {
-    writeFileSync(credsFile, '{}')
+    writeFileSync(credsFile, '{"token":"sk-abc"}')
     const sources = detectAuthSources({}, {}, credsFile)
     expect(sources.map((s) => s.kind)).toEqual(['oauth-file'])
+  })
+  it('does NOT count an empty/corrupt OAuth file as authentication (P2-5)', () => {
+    writeFileSync(credsFile, '{}')
+    expect(detectAuthSources({}, {}, credsFile)).toEqual([])
+    writeFileSync(credsFile, '{ broken')
+    expect(detectAuthSources({}, {}, credsFile)).toEqual([])
   })
   it('returns [] when nothing is available (the Keychain-only case too)', () => {
     expect(detectAuthSources({}, {}, NO_CREDS)).toEqual([])
   })
-  it('ignores empty-string keys', () => {
-    expect(detectAuthSources({ apiKey: '', env: { ANTHROPIC_API_KEY: '' } }, { ANTHROPIC_API_KEY: '' }, NO_CREDS)).toEqual([])
+  it('an empty-string config credential SHADOWS the process env (buildSdkEnv overlay, P2-1)', () => {
+    // sdk.env spreads OVER baseEnv, so a declared-but-empty key makes the
+    // subprocess unauthenticated; reporting process.env as the source would
+    // be wrong (R5 P2-1).
+    const sources = detectAuthSources(
+      { env: { ANTHROPIC_API_KEY: '' } },
+      { ANTHROPIC_API_KEY: 'sk-real-inherited' },
+      NO_CREDS,
+    )
+    expect(sources.map((s) => s.kind)).toEqual(['config.env'])
+    expect(sources[0].masked).toBe('****')
+  })
+  it('ignores truly-absent keys', () => {
+    expect(detectAuthSources({}, {}, NO_CREDS)).toEqual([])
   })
 })
 

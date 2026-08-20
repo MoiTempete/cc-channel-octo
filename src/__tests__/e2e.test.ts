@@ -1094,4 +1094,36 @@ describe('E2E smoke tests', () => {
       expect.objectContaining({ content: expect.stringContaining('not authenticated') }),
     );
   });
+
+  it('R5 P1-4: an auth failure with a success-subtype result — raw error text never reaches the channel', async () => {
+    // The SDK reports auth failures as assistant text + a result with
+    // subtype "success" + is_error (verified against a local 401 gateway);
+    // agent-bridge filters the assistant error block and THROWS the
+    // structured error (covered in agent-bridge-query.test.ts). This e2e
+    // asserts handleMessage's side of the contract: the raw text that WOULD
+    // have been streamed is never sent to the channel, and the owner-DM
+    // guidance is the only reply.
+    (queryAgent as ReturnType<typeof vi.fn>).mockImplementation(
+      async function* () {
+        throw new Error(
+          'Claude Code returned an error result: success: Not logged in · Please run /login (api_error_status=401)',
+        );
+      },
+    );
+    const ownerRouter = new SessionRouter(config, BOT_ID, USER_UID);
+    const msg = makeDmMsg('hello');
+    await simulateMessage(msg, config, store, ownerRouter, groupContext, streamRelay);
+
+    const sent = sendMessage as ReturnType<typeof vi.fn>;
+    const allContents = sent.mock.calls.map((c) => String(c[0].content)).join('\n');
+    // The full raw SDK error line must never be echoed (the guidance text
+    // deliberately names "Not logged in" — that is a controlled phrase, not
+    // the raw error body; the error's distinctive continuation is absent).
+    expect(allContents).not.toContain('Please run /login');
+    expect(sent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining('not authenticated with Claude'),
+      }),
+    );
+  });
 });

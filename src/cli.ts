@@ -301,7 +301,11 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean, procId: Pro
   }
 
   mkdirSync(dirname(paths.logFile), { recursive: true });
-  const fd = openSync(paths.logFile, 'a');
+  // 0600, not the 0666 open() default: agent error text (R5 P2-8) can carry
+  // secret-adjacent content (e.g. a gateway echoing the offending key) and
+  // must not land group/other-readable while config.ts warns about exactly
+  // this for config files.
+  const fd = openSync(paths.logFile, 'a', 0o600);
   const child = spawn(process.execPath, [paths.indexEntry], {
     detached: true,
     stdio: ['ignore', fd, fd],
@@ -540,7 +544,7 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
         }
         const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
         try {
-          const { imported, skipped, baseUrlConflict } = configureFromClaude(
+          const { imported, skipped, baseUrlConflict, keyConflict } = configureFromClaude(
             DEFAULT_CLAUDE_SETTINGS_PATH,
             configPath,
             join(effBaseDir, 'config.json'),
@@ -557,6 +561,11 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
               '  note: sdk.anthropicBaseUrl is also set in this config and takes precedence over the imported ANTHROPIC_BASE_URL',
             );
           }
+          if (keyConflict) {
+            console.log(
+              '  note: sdk.apiKey is also set in this config and shadows the imported ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN',
+            );
+          }
           if (skipped.length > 0) {
             console.log(`  (skipped non-ANTHROPIC_/CLAUDE_CODE_ vars: ${skipped.join(', ')})`);
           }
@@ -571,12 +580,25 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
       // out of argv / shell history). No TTY prompt, no ambient harvest — the
       // operator provides the secret explicitly (or uses --from-claude /
       // hand-edits config.json). Missing → a clear error with the alternatives.
-      const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
-      const keySource = apiKey
+      // An explicit `--api-key ""` is a CLEAR operation (P2-10); an empty env
+      // var is "not provided", not "clear".
+      const envKey = process.env.CC_OCTO_CONFIGURE_API_KEY;
+      const resolvedApiKey = apiKey !== undefined ? apiKey : (envKey ?? '');
+      const keySource = apiKey !== undefined
         ? '--api-key'
-        : process.env.CC_OCTO_CONFIGURE_API_KEY
+        : envKey !== undefined && envKey.length > 0
           ? 'CC_OCTO_CONFIGURE_API_KEY'
           : 'none';
+      if (apiKey === undefined && (envKey === undefined || envKey.length === 0)) {
+        console.error(
+          'cc-channel-octo: configure requires an API key. Provide it as:\n' +
+          '  - CC_OCTO_CONFIGURE_API_KEY=<key> cc-channel-octo configure --gateway-url <url>   (key stays out of argv/history)\n' +
+          '  - cc-channel-octo configure --gateway-url <url> --api-key <key>\n' +
+          '  - cc-channel-octo configure --from-claude   (import the env block of ~/.claude/settings.json)\n' +
+          '  - or hand-edit the config.json (chmod 600)',
+        );
+        return 2;
+      }
       const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
       try {
         configure(gatewayUrl ?? '', resolvedApiKey, configPath, { model, apiUrl });

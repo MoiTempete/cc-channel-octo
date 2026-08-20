@@ -39,9 +39,15 @@ describe('configure', () => {
     configure('https://gw', 'sk', nested)
     expect(JSON.parse(readFileSync(nested, 'utf-8')).sdk.apiKey).toBe('sk')
   })
-  it('throws on empty gatewayUrl or apiKey', () => {
+  it('throws on empty gatewayUrl or a MISSING apiKey', () => {
     expect(() => configure('', 'sk', cfgPath)).toThrow()
-    expect(() => configure('https://gw', '', cfgPath)).toThrow()
+    expect(() => configure('https://gw', undefined, cfgPath)).toThrow(/--api-key is required/)
+  })
+  it('an explicit empty apiKey CLEARS the key (P2-10)', () => {
+    configure('https://gw', 'sk-old', cfgPath)
+    configure('https://gw', '', cfgPath)
+    const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+    expect(parsed.sdk.apiKey).toBe('')
   })
   it('rejects an unsafe (non-http/https) gateway url', () => {
     expect(() => configure('ftp://gw', 'sk', cfgPath)).toThrow()

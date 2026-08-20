@@ -184,7 +184,7 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
       `[cc-channel-octo] ${label}WARNING: no Claude authentication detected for this bot — ` +
       `the first message will fail with "Not logged in". Fix with one of:\n` +
       `  - npm run setup (source) / cc-channel-octo configure --from-claude (global)  (import the env block of ~/.claude/settings.json: token + base URL + model mapping)\n` +
-      `  - cc-channel-octo configure --gateway-url <url> --api-key <key>  (writes sdk.apiKey; key also via CC_OCTO_CONFIGURE_API_KEY)\n` +
+      `  - CC_OCTO_CONFIGURE_API_KEY=<key> cc-channel-octo configure --gateway-url <url>  (key stays out of argv/history)\n` +
       `  - add sdk.apiKey or sdk.env to ${config.baseDir}/${config.botId ?? 'default'}/config.json\n` +
       `  - export ANTHROPIC_API_KEY in the shell that starts the gateway (inherited into the SDK subprocess)\n` +
       `  - run \`claude\` + \`/login\` on this host (OAuth; not statically detectable when stored in the macOS Keychain)\n` +

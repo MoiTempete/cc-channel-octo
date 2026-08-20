@@ -373,6 +373,17 @@ export async function* queryAgent(
           }
         }
         if (message.type === 'assistant') {
+          // R5 P1-4: SDK auth failures arrive as an ORDINARY assistant text
+          // block ("Not logged in · Please run /login") BEFORE a result with
+          // is_error — if we relay it, the raw error is streamed to the IM
+          // channel (including groups) and only afterwards does the catch
+          // append the neutral reply: two contradictory messages, and the
+          // "never echo the raw error" comment violated. An assistant message
+          // carrying `error` (SDKAssistantMessageError) is that API-error
+          // marker — skip its text entirely; the throw below owns the reply.
+          if ((message as { error?: unknown }).error !== undefined) {
+            continue;
+          }
           // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
           // assistant message lacks `.message` or `.message.content`, treat as
           // empty rather than throwing TypeError into the async generator.
@@ -399,23 +410,37 @@ export async function* queryAgent(
             }
           }
         } else if (message.type === 'result') {
-          if (message.subtype !== 'success') {
-            // THROW instead of yielding "[Error: <subtype>]": a yielded string
-            // completes the generator normally, so handleMessage's catch (the
-            // auth-error UX path) is never reached and the IM user gets the
-            // raw marker. Carry BOTH the structured api_error_status (401 etc.)
-            // AND the SDK's `errors` array — that's where the CLI's own text
-            // ("Not logged in · Please run /login") lives, and it is what
-            // isAuthError matches. The CLI's stderr never reaches us (stdio is
-            // ignore unless an opt-in stderr callback is supplied), so the
-            // result errors are the only authentic signal. Any already-yielded
-            // partial output was flushed by stream-relay before this point.
-            const resultMsg = message as { api_error_status?: unknown; errors?: unknown };
+          // THROW instead of yielding "[Error: <subtype>]": a yielded string
+          // completes the generator normally, so handleMessage's catch (the
+          // auth-error UX path) is never reached and the IM user gets the raw
+          // marker. R5 P1-4: auth failures arrive with subtype === 'success'
+          // + is_error === true (verified against a local 401 gateway) — the
+          // api_error_status and the human text live on SDKResultSuccess
+          // (result / errors), so treat is_error as the failure signal, not
+          // the subtype. The CLI's stderr never reaches us (stdio is ignore
+          // unless an opt-in stderr callback is supplied), so the result
+          // fields are the only authentic signal. Any already-yielded partial
+          // output was flushed by stream-relay before this point.
+          const resultMsg = message as {
+            subtype?: unknown;
+            is_error?: unknown;
+            api_error_status?: unknown;
+            errors?: unknown;
+            result?: unknown;
+          };
+          if (resultMsg.subtype !== 'success' || resultMsg.is_error === true) {
             const status = resultMsg.api_error_status;
             const statusPart = status !== undefined && status !== null ? ` (api_error_status=${status})` : '';
             const errors = Array.isArray(resultMsg.errors) ? resultMsg.errors.filter((e): e is string => typeof e === 'string') : [];
-            const errorText = errors.length > 0 ? `: ${errors.join('; ').slice(0, 500)}` : '';
-            throw new Error(`Claude Code returned an error result: ${message.subtype}${errorText}${statusPart}`);
+            const resultText = typeof resultMsg.result === 'string' ? resultMsg.result : '';
+            const detail = errors.length > 0
+              ? `: ${errors.join('; ').slice(0, 500)}`
+              : resultText.length > 0
+                ? `: ${resultText.slice(0, 500)}`
+                : '';
+            throw new Error(
+              `Claude Code returned an error result: ${String(resultMsg.subtype ?? 'error')}${detail}${statusPart}`,
+            );
           }
         } else if (
           message.type === 'system' &&

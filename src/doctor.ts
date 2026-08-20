@@ -17,6 +17,7 @@ import { DEFAULT_CONFIG_PATH } from './config.js';
 import {
   detectAuthSources,
   maskKey,
+  KEY_ENV_VARS,
   DEFAULT_CREDENTIALS_PATH,
   type SdkAuthInput,
   type AuthSourceInfo,
@@ -207,7 +208,13 @@ function readSdkAndToken(path: string): {
       if (typeof raw.botToken === 'string') botToken = raw.botToken;
       if (raw.sdk && typeof raw.sdk === 'object' && !Array.isArray(raw.sdk)) {
         const own = narrowSdk(raw.sdk);
-        botHasOwnSdk = own.apiKey !== undefined || (own.env !== undefined && Object.keys(own.env).length > 0);
+        // P2-10: only a CREDENTIAL counts as "own sdk" for the origin label —
+        // a per-bot env with just ANTHROPIC_MODEL inherits the global key and
+        // must still be labelled "(from global config)".
+        botHasOwnSdk =
+          own.apiKey !== undefined ||
+          (own.env !== undefined &&
+            KEY_ENV_VARS.some((k) => Object.prototype.hasOwnProperty.call(own.env, k)));
         sdk = own;
       }
     }
@@ -386,7 +393,7 @@ export function doctorReport(
   if (missing > 0) {
     lines.push(`verdict: ${missing} bot(s) without a statically detectable auth source. If you log in via the macOS Keychain, verify with \`claude auth status\` first. Otherwise fix with one of:`);
     lines.push('  - `npm run setup` (source) / `cc-channel-octo configure --from-claude` (global) — import the env block of ~/.claude/settings.json (token + base URL + model mapping); add `-- --bot <id>` / `--bot <id>` for a per-bot config');
-    lines.push('  - `cc-channel-octo configure --gateway-url <url> --api-key <key>` (writes sdk.apiKey; key also via CC_OCTO_CONFIGURE_API_KEY)');
+    lines.push('  - `CC_OCTO_CONFIGURE_API_KEY=<key> cc-channel-octo configure --gateway-url <url>` (key stays out of argv/history)');
     lines.push('  - add sdk.apiKey or sdk.env to the bot\'s config.json (chmod 600)');
     lines.push('  - export ANTHROPIC_API_KEY in the shell that starts the gateway');
     lines.push('  - run `claude` + `/login` on this host (OAuth)');

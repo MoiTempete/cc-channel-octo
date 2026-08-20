@@ -135,6 +135,25 @@ describe('queryAgent', () => {
     expect(chunks).toEqual([]);
   });
 
+  it('R5 P1-4: a success-subtype result with is_error THROWS (auth failures arrive this way)', async () => {
+    const stream = createMockStream([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Invalid API key · Fix external API key' }] }, error: 'authentication_failed' },
+      { type: 'result', subtype: 'success', is_error: true, api_error_status: 401, result: 'Invalid API key · Fix external API key' },
+    ]);
+    mockQuery.mockReturnValue(stream);
+
+    const chunks: string[] = [];
+    await expect(async () => {
+      for await (const chunk of queryAgent('test', makeConfig())) {
+        chunks.push(chunk);
+      }
+    }).rejects.toThrow(
+      'Claude Code returned an error result: success: Invalid API key · Fix external API key (api_error_status=401)',
+    );
+    // The assistant error block must NOT be yielded either.
+    expect(chunks).toEqual([]);
+  });
+
   it('does not yield error for success result', async () => {
     const stream = createMockStream([
       {
