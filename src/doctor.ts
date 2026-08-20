@@ -120,7 +120,10 @@ function parseGlobalConfig(configPath: string): GlobalConfigShape {
       // too (a bot0 with no auth source would otherwise report idle + exit 0).
       const bb = b && typeof b === 'object' ? (b as { id?: unknown; botToken?: unknown }) : null;
       entries.push({
-        id: bb && typeof bb.id === 'string' && bb.id.length > 0 ? bb.id : `bot${i}`,
+        // `??`, not truthiness (R7 P2): runtime uses `bot.id ?? \`bot${i}\`` —
+        // an explicit EMPTY string stays "" and then fails the slug check at
+        // boot; doctor must surface that as an invalid id, not synthesize bot0.
+        id: bb && typeof bb.id === 'string' ? bb.id : `bot${i}`,
         inlineBotToken: bb && typeof bb.botToken === 'string' ? bb.botToken : undefined,
       });
     });

@@ -212,12 +212,19 @@ export function buildSystemPrompt(
 const MAX_SYSTEM_PROMPT_CHARS = 100 * 1024;
 
 /**
- * The SDKAssistantMessageError values that mark an AUTH failure. The union has
- * ten values; the rest ('max_output_tokens', 'rate_limit', 'overloaded', …)
- * ride on assistant messages that CARRY real output and must be relayed, not
- * suppressed (R6 P1-1).
+ * R7 P1-1: EVERY assistant message carrying an `error` marker is a SYNTHETIC
+ * API-error block — proven against the bundled CLI, where a single factory
+ * (o1) hard-codes isApiErrorMessage and takes the error string as its content
+ * for all ten SDKAssistantMessageError values. For 'max_output_tokens' the
+ * real (truncated) answer is emitted FIRST as an ordinary assistant message
+ * and the marker block is appended after; for 'rate_limit' the content is the
+ * upstream 429 body verbatim; 'billing_error' discloses the org's credit
+ * state; 'model_not_found' embeds the model id and raw error. Relaying any of
+ * them streams raw upstream error text into the IM channel (groups included)
+ * — the exact leak R5 P1-4 fixed. So ALL markers are suppressed; the marker
+ * is recorded and appended to the thrown error so isAuthError keeps its
+ * discriminator for results that carry no status/text.
  */
-const AUTH_ERROR_MARKERS = new Set(['authentication_failed', 'oauth_org_not_allowed']);
 
 /**
  * Query Claude Agent SDK with structural role separation.
@@ -397,9 +404,9 @@ export async function* queryAgent(
           // no status/text, the marker is the only discriminator) and relay
           // everything else normally.
           const assistantError = (message as { error?: unknown }).error;
-          if (typeof assistantError === 'string' && AUTH_ERROR_MARKERS.has(assistantError)) {
-            authMarker = assistantError;
-            continue;
+          if (typeof assistantError === 'string' && assistantError.length > 0) {
+            authMarker = assistantError; // all ten markers; isAuthError matches the auth class
+            continue; // synthetic API-error block — suppress (R7 P1-1)
           }
           // D1/P1-4 (齐 P1-4): guard against malformed SDK output — if the
           // assistant message lacks `.message` or `.message.content`, treat as

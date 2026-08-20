@@ -150,6 +150,20 @@ describe('configureFromClaude', () => {
     expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/unsafe ANTHROPIC_VERTEX_BASE_URL/)
     expect(existsSync(cfgPath)).toBe(false)
   })
+  it('R7 P1-2: a leading-space base URL cannot bypass the SSRF gate (trimmed before check)', () => {
+    // The WHATWG URL parser strips leading C0 whitespace on the consumer side,
+    // so " https://169.254.169.254" resolves normally in the subprocess — the
+    // value must be trimmed BEFORE the gate and persisted trimmed.
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: ' https://169.254.169.254' } }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/unsafe ANTHROPIC_BASE_URL/)
+    expect(existsSync(cfgPath)).toBe(false)
+  })
+  it('R7 P1-2: leading whitespace is trimmed from otherwise-valid values before persisting', () => {
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: '  https://api.deepseek.com/anthropic  ' } }))
+    configureFromClaude(claudeSettingsPath, cfgPath)
+    const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+    expect(parsed.sdk.env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic')
+  })
   it('flags baseUrlConflict when sdk.anthropicBaseUrl would shadow the imported base URL', () => {
     writeFileSync(cfgPath, JSON.stringify({ sdk: { anthropicBaseUrl: 'https://gw.example.com' } }))
     writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' } }))

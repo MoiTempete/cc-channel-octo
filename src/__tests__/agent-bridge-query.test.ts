@@ -135,23 +135,17 @@ describe('queryAgent', () => {
     expect(chunks).toEqual([]);
   });
 
-  it('R6 P1-1: only AUTH-class assistant markers suppress content (table over SDKAssistantMessageError)', async () => {
-    // SDKAssistantMessageError is a 10-value union; max_output_tokens /
-    // rate_limit / overloaded assistant messages CARRY the model's real
-    // output and must be relayed, not dropped.
-    const NON_AUTH: Array<[string, boolean]> = [
-      ['max_output_tokens', true], // carries real (truncated) output — must relay
-      ['rate_limit', true],
-      ['overloaded', true],
-      ['billing_error', true],
-      ['model_not_found', true],
-      ['invalid_request', true],
-      ['server_error', true],
-      ['unknown', true],
-      ['authentication_failed', false], // auth class — suppress
-      ['oauth_org_not_allowed', false],
+  it('R7 P1-1: EVERY error-marked assistant block is a synthetic API error — all ten markers suppressed', async () => {
+    // Proven against the bundled CLI: one factory (o1) emits every error-
+    // marked message with the error string as its content. Relaying any of
+    // them streams raw upstream error text (429 body, billing state, model
+    // id + raw error) into the IM channel.
+    const MARKERS = [
+      'authentication_failed', 'oauth_org_not_allowed', 'billing_error',
+      'rate_limit', 'overloaded', 'invalid_request', 'model_not_found',
+      'server_error', 'unknown', 'max_output_tokens',
     ];
-    for (const [marker, shouldRelay] of NON_AUTH) {
+    for (const marker of MARKERS) {
       const stream = createMockStream([
         { type: 'assistant', message: { content: [{ type: 'text', text: 'the answer' }] }, error: marker },
         { type: 'result', subtype: 'success', is_error: false },
@@ -161,15 +155,29 @@ describe('queryAgent', () => {
       for await (const chunk of queryAgent('test', makeConfig())) {
         chunks.push(chunk);
       }
-      if (shouldRelay) {
-        expect(chunks).toEqual(['the answer'], `marker ${marker} must RELAY the output`);
-      } else {
-        expect(chunks).toEqual([], `marker ${marker} must be suppressed`);
-      }
+      expect(chunks).toEqual([], `marker ${marker} must be SUPPRESSED (synthetic API error)`);
     }
   });
 
-  it('R6 P1-1: the auth marker is carried into the throw when the result has no status/text', async () => {
+  it('R7 P1-1: a REAL truncated answer (ordinary assistant, no error) still reaches the channel', async () => {
+    // max_output_tokens: the real content is yielded as an ordinary assistant
+    // message FIRST; the marker block is a separate synthetic message appended
+    // after. Suppressing markers must not suppress the real answer.
+    const stream = createMockStream([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'the real truncated answer' }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'synthetic marker text' }] }, error: 'max_output_tokens' },
+      { type: 'result', subtype: 'success', is_error: false },
+    ]);
+    mockQuery.mockReturnValue(stream);
+    const chunks: string[] = [];
+    for await (const chunk of queryAgent('test', makeConfig())) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toEqual(['the real truncated answer']);
+    expect(chunks).not.toContain('synthetic marker text');
+  });
+
+  it('R7 P1-1: any marker is carried into the throw when the result has no status/text', async () => {
     // is_error with no api_error_status / result / errors → the marker is the
     // only discriminator isAuthError can use.
     const stream = createMockStream([

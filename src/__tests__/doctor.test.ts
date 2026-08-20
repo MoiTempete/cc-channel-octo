@@ -202,6 +202,14 @@ describe('doctorReport', () => {
     expect(report.text).toContain('invalid bot id')
     expect(report.missing).toBe(1)
   })
+  it('R7 P2: an explicit EMPTY id is an invalid id (runtime keeps "" and fails the slug check)', () => {
+    // resolveBotConfigs uses `bot.id ?? bot${i}` — "" does not fall through,
+    // and the slug check then throws at boot. doctor must not synthesize bot0.
+    writeGlobal([{ id: '', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalKey12345' } })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.text).toContain('invalid bot id')
+    expect(report.missing).toBe(1)
+  })
 
   it('reports CONFIG BROKEN for a corrupt per-bot file despite an inherited global key (r4 B2)', () => {
     // Runtime readConfigFile throws for the same file at boot; a global

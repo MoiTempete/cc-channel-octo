@@ -39,7 +39,13 @@ export function configure(
   if (apiKey === undefined) throw new Error('configure: --api-key is required')
   // Trim surrounding whitespace (R6): a trailing newline in
   // CC_OCTO_CONFIGURE_API_KEY must not be persisted into the subprocess env.
-  apiKey = apiKey.trim()
+  // Whitespace-only explicit input is a quoting mistake, not a CLEAR intent —
+  // refuse it rather than silently wiping the configured credential (R7 P2).
+  const trimmedKey = apiKey.trim()
+  if (apiKey.length > 0 && trimmedKey.length === 0) {
+    throw new Error('configure: --api-key is whitespace-only — did you mean to clear it? (use an empty string explicitly)')
+  }
+  apiKey = trimmedKey
   // The gateway receives the API key + all prompt/response content, so it gets
   // the same SSRF policy as apiUrl (mirrors loadConfig's anthropicBaseUrl check).
   if (!isAllowedApiUrl(gatewayUrl)) {
@@ -116,7 +122,13 @@ function writeAtomic(path: string, merged: Record<string, unknown>): void {
   try {
     chmodSync(dirname(path), 0o700)
   } catch {
-    /* existing dir we cannot tighten — write proceeds */
+    // R7 P2: failing to tighten a group/other-writable parent undercuts the
+    // threat model the 0600 file relies on — say so instead of silently
+    // writing into an exposed directory.
+    console.warn(
+      `configure: could not tighten directory permissions on ${dirname(path)} — ` +
+      `a group/other-writable parent lets co-located users rename config files away`,
+    )
   }
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   try {
@@ -208,16 +220,21 @@ export function configureFromClaude(
   // Every imported value that LOOKS like an http(s) endpoint reaches the SDK
   // subprocess and receives the API key + all traffic, so each gets the SAME
   // SSRF policy as configure --gateway-url and loadConfig's anthropicBaseUrl
-  // check. Validated BY VALUE (R6): name-based patterns miss FOO2_URL and
-  // non-*_URL endpoint vars. The rejection message prints the host only —
-  // never userinfo embedded in the URL (R6).
+  // check. UNION of the two rules (R7 P1-2): value-based (catches FOO2_URL
+  // and non-*_URL endpoint vars) OR name-based (ANTHROPIC_BASE_URL etc. even
+  // with a leading-space prefix that the value test would miss — the WHATWG
+  // URL parser trims leading C0 whitespace on the consumer side). Values are
+  // TRIMMED before the check AND persisted trimmed, so a " https://…" prefix
+  // can neither bypass the gate nor reach the subprocess.
   for (const [key, value] of Object.entries(imported)) {
-    if (/^https?:\/\//i.test(value) && !isAllowedApiUrl(value)) {
+    const v = value.trim()
+    if ((/^https?:\/\//i.test(v) || /(?:^|_)[A-Za-z0-9]+_URL$/.test(key)) && !isAllowedApiUrl(v)) {
       throw new Error(
-        `configure --from-claude: unsafe ${key}=${displayBaseUrl(value)} in ${claudeSettingsPath} ` +
+        `configure --from-claude: unsafe ${key}=${displayBaseUrl(v)} in ${claudeSettingsPath} ` +
         `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
       )
     }
+    imported[key] = v
   }
   const existing = readExisting(configPath)
   const existingSdk =
@@ -237,8 +254,10 @@ export function configureFromClaude(
   // P2-2: buildSdkEnv layers sdk.apiKey AFTER sdk.env, so a key written by an
   // earlier `configure --gateway-url --api-key` silently shadows an imported
   // token — warn symmetrically with baseUrlConflict. Same global-config check.
+  // Non-empty on the imported side too (R7 P2): an imported "" raises no
+  // shadow warning, mirroring the existing-side non-empty rule.
   const importedKey =
-    imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN ?? imported.CLAUDE_CODE_OAUTH_TOKEN
+    (imported.ANTHROPIC_API_KEY ?? imported.ANTHROPIC_AUTH_TOKEN ?? imported.CLAUDE_CODE_OAUTH_TOKEN) || undefined
   let baseUrlConflict =
     // Non-empty only (R6): a cleared `--api-key ""` (or empty base URL) does
     // not shadow anything at runtime — buildSdkEnv skips falsy values.

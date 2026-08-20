@@ -310,7 +310,9 @@ async function cmdStart(paths: SupervisorPaths, foreground: boolean, procId: Pro
   try {
     chmodSync(paths.logFile, 0o600);
   } catch {
-    /* best-effort */
+    // R7 P2: keep the residual exposure visible — API-error text can carry
+    // secret-adjacent content into a log we could not tighten.
+    console.warn(`cc-channel-octo: could not tighten ${paths.logFile} to 0600`);
   }
   const child = spawn(process.execPath, [paths.indexEntry], {
     detached: true,
