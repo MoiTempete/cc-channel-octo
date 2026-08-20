@@ -117,11 +117,32 @@ describe('doctorReport', () => {
     expect(report.text).toContain('group/other readable')
   })
 
-  it('reports an absent per-bot config as UNKNOWN/missing', () => {
+  it('reports an absent per-bot config with no token anywhere as missing', () => {
     writeGlobal([{ id: 'default' }])
     const report = doctorReport(cfgPath, {}, NO_CREDS)
-    expect(report.text).toContain('NOT FOUND')
+    expect(report.text).toContain('MISSING BOT TOKEN')
     expect(report.missing).toBe(1)
+  })
+
+  it('discovers the LEGACY top-level botToken shape (no bots[], no per-bot file)', () => {
+    // resolveBotConfigs synthesizes { id: 'default', botToken } from a global
+    // top-level botToken — doctor must diagnose that bot, not report idle.
+    writeGlobal(undefined, { botToken: 'bf_abcDEF123456' })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.hasBots).toBe(true)
+    expect(report.text).toContain('bot "default"')
+    expect(report.text).not.toContain('none configured')
+    expect(report.missing).toBe(1) // no auth source → NOT a false-success exit 0
+  })
+
+  it('accepts an inline bots[].botToken with no per-bot file (runtime needs no file)', () => {
+    // Healthy: inline token + global sdk.apiKey. Previously doctor told the
+    // operator to create a config file the runtime does not need, and exited 1.
+    writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalInlineKey' } })
+    const report = doctorReport(cfgPath, {}, NO_CREDS)
+    expect(report.missing).toBe(0)
+    expect(report.text).toContain('(from global config)')
+    expect(report.text).not.toContain('NOT FOUND')
   })
 
   it('lists env var presence in the environment section', () => {
@@ -152,6 +173,14 @@ describe('runDoctor exit code (structured, not substring search)', () => {
   })
   it('returns 0 for an uninitialized install (idle is not an auth failure)', () => {
     expect(runDoctor(join(dir, 'missing.json'), {})).toBe(0)
+  })
+  it('returns 1 for the legacy top-level botToken shape without auth', () => {
+    writeGlobal(undefined, { botToken: 'bf_abcDEF123456' })
+    expect(runDoctor(cfgPath, {})).toBe(1)
+  })
+  it('returns 0 for an inline bots[].botToken + global sdk.apiKey, no per-bot dir', () => {
+    writeGlobal([{ id: 'default', botToken: 'bf_abcDEF123456' }], { sdk: { apiKey: 'sk-globalInlineKey' } })
+    expect(runDoctor(cfgPath, {})).toBe(0)
   })
   it('does not read the ambient process env (host ANTHROPIC_API_KEY must not flip the verdict)', () => {
     writeGlobal([{ id: 'default' }])

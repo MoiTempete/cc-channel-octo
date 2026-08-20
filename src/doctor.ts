@@ -55,26 +55,74 @@ function permissionNote(mode: string | null): string {
   return groupOrOther ? ' (WARNING: group/other readable — fix with chmod 600)' : '';
 }
 
-/** bot ids from the global config's bots[]; legacy default/ fallback. */
-export function listBotIds(globalConfigPath: string): string[] {
+/** One bot entry as the runtime sees it: global → inline bots[] → per-bot file. */
+export interface DoctorBotEntry {
+  id: string;
+  /** botToken from the global config (top-level legacy field or inline bots[] entry). */
+  inlineBotToken?: string;
+}
+
+/** Parsed global config: the layers doctor must model like resolveBotConfigs(). */
+interface GlobalConfigShape {
+  /** Legacy top-level botToken (single-bot install, no bots[]). */
+  topLevelBotToken?: string;
+  /** bots[] entries (each may carry an inline botToken). */
+  entries: DoctorBotEntry[];
+  /** Global sdk block — the base every bot inherits. */
+  sdk: SdkAuthInput;
+}
+
+/**
+ * Parse the global config with the SAME discovery rules as resolveBotConfigs():
+ *   - bots[] present → those entries (inline botToken is explicitly supported)
+ *   - bots[] absent + top-level botToken → synthesize { id: 'default' } (legacy)
+ *   - bots[] absent + no top-level token + default/config.json exists → 'default'
+ *   - otherwise → no bots (idle)
+ * `missing`/exit codes are only trustworthy if doctor discovers the same bots
+ * the runtime would actually run.
+ */
+function parseGlobalConfig(configPath: string): GlobalConfigShape {
+  const baseDir = dirname(configPath);
+  let topLevelBotToken: string | undefined;
+  let bots: unknown[] = [];
+  let sdkRaw: unknown;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(globalConfigPath, 'utf-8'));
+    const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'));
     if (parsed && typeof parsed === 'object') {
-      const bots = (parsed as { bots?: unknown }).bots;
-      if (Array.isArray(bots)) {
-        const ids = bots
-          .map((b) => (b && typeof b === 'object' && typeof (b as { id?: unknown }).id === 'string'
-            ? ((b as { id: string }).id)
-            : null))
-          .filter((id): id is string => id !== null && id.length > 0);
-        if (ids.length > 0) return ids;
-      }
+      const p = parsed as { botToken?: unknown; bots?: unknown; sdk?: unknown };
+      if (typeof p.botToken === 'string') topLevelBotToken = p.botToken;
+      if (Array.isArray(p.bots)) bots = p.bots;
+      sdkRaw = p.sdk;
     }
   } catch {
-    /* unparseable/missing → fall through to legacy check below */
+    /* unparseable/missing → idle shape below */
   }
-  // Legacy single-bot install: token lives only in <baseDir>/default/config.json.
-  return existsSync(join(dirname(globalConfigPath), 'default', 'config.json')) ? ['default'] : [];
+  let entries: DoctorBotEntry[] = [];
+  if (bots.length > 0) {
+    for (const b of bots) {
+      if (b && typeof b === 'object') {
+        const bb = b as { id?: unknown; botToken?: unknown };
+        if (typeof bb.id === 'string' && bb.id.length > 0) {
+          entries.push({
+            id: bb.id,
+            inlineBotToken: typeof bb.botToken === 'string' ? bb.botToken : undefined,
+          });
+        }
+      }
+    }
+  } else if (topLevelBotToken !== undefined) {
+    // Legacy single-bot: resolveBotConfigs synthesizes { id: 'default', botToken }.
+    entries = [{ id: 'default', inlineBotToken: topLevelBotToken }];
+  } else if (existsSync(join(baseDir, 'default', 'config.json'))) {
+    // Legacy single-bot whose token lives only in the per-bot file.
+    entries = [{ id: 'default' }];
+  }
+  return { topLevelBotToken, entries, sdk: narrowSdk(sdkRaw) };
+}
+
+/** bot ids from the global config (same discovery rules as resolveBotConfigs). */
+export function listBotIds(globalConfigPath: string): string[] {
+  return parseGlobalConfig(globalConfigPath).entries.map((e) => e.id);
 }
 
 /**
@@ -102,15 +150,17 @@ function narrowSdk(raw: unknown): SdkAuthInput {
  * so an apiKey configured in the GLOBAL config.json counts for every bot that
  * doesn't override it, exactly as at runtime.
  */
-function readSdkAndToken(path: string): { sdk: SdkAuthInput; botToken: string; botHasOwnSdk: boolean } {
+function readSdkAndToken(path: string): { sdk: SdkAuthInput; botToken: string | undefined; botHasOwnSdk: boolean } {
   let sdk: SdkAuthInput = {};
-  let botToken = '';
+  // undefined (NOT '') when absent: `??` in the caller must fall through to the
+  // inline/top-level token exactly like config.ts's perBotFile.botToken ?? bot.botToken.
+  let botToken: string | undefined;
   let botHasOwnSdk = false;
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
     if (parsed && typeof parsed === 'object') {
       const raw = parsed as { botToken?: unknown; sdk?: unknown };
-      if (typeof raw.botToken === 'string') botToken = raw.botToken;
+      if (typeof raw.botToken === 'string' && raw.botToken.length > 0) botToken = raw.botToken;
       if (raw.sdk && typeof raw.sdk === 'object' && !Array.isArray(raw.sdk)) {
         const own = narrowSdk(raw.sdk);
         botHasOwnSdk = own.apiKey !== undefined || (own.env !== undefined && Object.keys(own.env).length > 0);
@@ -183,18 +233,11 @@ export function doctorReport(
   }
   lines.push(`  mode ${fileMode(configPath) ?? '?'}${permissionNote(fileMode(configPath))}`);
 
-  // The global `sdk` block is the BASE every bot inherits (per-bot overrides
-  // shallowly, same as mergeConfig at runtime) — an apiKey configured here
-  // counts for every bot that doesn't override it, so it must feed detection.
-  let globalSdk: SdkAuthInput = {};
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf-8'));
-    if (parsed && typeof parsed === 'object') {
-      globalSdk = narrowSdk((parsed as { sdk?: unknown }).sdk);
-    }
-  } catch {
-    /* unparseable — listBotIds reports the shape; detection just sees no sdk */
-  }
+  // Parse the global config with the same discovery rules as resolveBotConfigs()
+  // (top-level botToken / inline bots[] / per-bot file) so doctor diagnoses the
+  // bots the runtime would ACTUALLY run.
+  const global = parseGlobalConfig(configPath);
+  const globalSdk = global.sdk;
   const globalCredential = globalSdk.apiKey ?? firstCredential(globalSdk.env);
   const globalAuth = globalCredential
     ? `apiKey ${maskKey(globalCredential)}`
@@ -202,33 +245,50 @@ export function doctorReport(
   lines.push(`  sdk: ${globalAuth} (base inherited by all bots)`);
 
   // --- Per-bot diagnosis ---
-  const botIds = listBotIds(configPath);
   const baseDir = dirname(configPath);
   let missing = 0;
-  if (botIds.length === 0) {
+  if (global.entries.length === 0) {
     lines.push('bots: none configured (idle state — awaiting provision)');
   } else {
-    for (const botId of botIds) {
+    for (const entry of global.entries) {
+      const botId = entry.id;
       const botCfgPath = join(baseDir, botId, 'config.json');
       lines.push(`bot "${botId}"`);
       lines.push(`  config: ${botCfgPath}`);
-      if (!existsSync(botCfgPath)) {
-        lines.push('  NOT FOUND — create it with a botToken (and optional sdk block)');
-        lines.push('  Claude auth: UNKNOWN');
-        lines.push('  verdict: UNKNOWN');
+      // Three-layer token resolution, matching config.ts:638
+      // (perBotFile.botToken ?? bot.botToken). A missing per-bot FILE is fine
+      // when the token comes from the global config — the runtime needs no
+      // file then, and telling the operator to create one is a false alarm.
+      let fileSdk: SdkAuthInput = {};
+      let fileToken: string | undefined;
+      let fileHasOwnSdk = false;
+      if (existsSync(botCfgPath)) {
+        const mode = fileMode(botCfgPath);
+        lines.push(`  mode ${mode ?? '?'}${permissionNote(mode)}`);
+        const r = readSdkAndToken(botCfgPath);
+        fileSdk = r.sdk;
+        fileToken = r.botToken;
+        fileHasOwnSdk = r.botHasOwnSdk;
+      } else {
+        lines.push('  (no per-bot config.json — token may come from the global config)');
+      }
+      const token = fileToken ?? entry.inlineBotToken ?? '';
+      const tokenNote = !fileToken && entry.inlineBotToken ? ' (from global config)' : '';
+      lines.push(`  botToken: ${token ? `${maskKey(token)}${tokenNote}` : 'MISSING'}`);
+      if (!token) {
+        lines.push(`  NOT FOUND — set botToken in ${botCfgPath} or inline (bots[].botToken / top-level botToken)`);
+        lines.push('  verdict: MISSING BOT TOKEN');
         missing++;
         continue;
       }
-      const mode = fileMode(botCfgPath);
-      lines.push(`  mode ${mode ?? '?'}${permissionNote(mode)}`);
-      const { sdk: botSdk, botToken, botHasOwnSdk } = readSdkAndToken(botCfgPath);
-      lines.push(`  botToken: ${botToken ? maskKey(botToken) : 'MISSING'}`);
-      const sources = detectAuthSources(mergeSdk(globalSdk, botSdk), baseEnv, credentialsPath);
+      // sdk merge matches runtime: global sdk ⊕ per-bot FILE sdk (inline bots[]
+      // entries carry no sdk block — only botToken/model/systemPrompt).
+      const sources = detectAuthSources(mergeSdk(globalSdk, fileSdk), baseEnv, credentialsPath);
       // "(from global config)" is only true when the winning source is config-
       // based AND the bot carries no own sdk block — process.env / oauth-file
       // never come from the global config.
       const configBased = sources.some((s) => s.kind === 'config.apiKey' || s.kind === 'config.env');
-      const originNote = configBased && !botHasOwnSdk ? ' (from global config)' : '';
+      const originNote = configBased && !fileHasOwnSdk ? ' (from global config)' : '';
       lines.push(`  Claude auth: ${describeSources(sources)}${originNote}`);
       if (sources.length === 0) {
         lines.push('  verdict: UNKNOWN (no static auth source)');
@@ -258,12 +318,12 @@ export function doctorReport(
     lines.push('  - add sdk.apiKey or sdk.env to the bot\'s config.json (chmod 600)');
     lines.push('  - export ANTHROPIC_API_KEY in the shell that starts the gateway');
     lines.push('  - run `claude` + `/login` on this host (OAuth)');
-  } else if (botIds.length === 0) {
+  } else if (global.entries.length === 0) {
     lines.push('verdict: NO BOTS — configure bots before worrying about authentication');
   } else {
     lines.push('verdict: OK — every bot has a Claude authentication source');
   }
-  return { text: lines.join('\n'), missing, hasBots: botIds.length > 0 };
+  return { text: lines.join('\n'), missing, hasBots: global.entries.length > 0 };
 }
 
 /**
