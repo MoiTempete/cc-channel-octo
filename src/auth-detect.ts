@@ -42,13 +42,13 @@ export interface AuthSourceInfo {
 
 /**
  * Mask a secret for logs/diagnosis: `sk-****Jfo` (first 5 + last 4 chars).
- * Credentials shorter than 13 chars (some gateway tokens are 11-12) would
- * reveal most of their value under that rule, so anything <= 12 is fully
- * masked.
+ * A fixed 9 visible chars is fine for long API keys but exposes most of a
+ * short one (13 chars → 69%), so anything whose 9 visible chars would be
+ * >= 60% of the value is fully masked instead (Octo-Q P2-2).
  */
 export function maskKey(key: string | undefined | null): string {
   if (!key) return '****';
-  if (key.length <= 12) return '****';
+  if (key.length <= 15) return '****'; // 9 visible >= 60% of 15
   return `${key.slice(0, 5)}****${key.slice(-4)}`;
 }
 
@@ -63,11 +63,17 @@ export function maskKey(key: string | undefined | null): string {
  * phrase the "no auth found" warning to acknowledge that case.
  */
 /**
- * The two credential env vars the SDK subprocess (Claude Code CLI) accepts.
- * Third-party LLM gateways commonly use ANTHROPIC_AUTH_TOKEN (DeepSeek etc.),
- * so both must count as an authentication source.
+ * The credential env vars the SDK subprocess (Claude Code CLI) accepts.
+ * Third-party LLM gateways commonly use ANTHROPIC_AUTH_TOKEN (DeepSeek etc.);
+ * CLAUDE_CODE_OAUTH_TOKEN is the CLI's documented CI-flow credential, which
+ * --from-claude can import verbatim — counting it as a source keeps doctor's
+ * verdict aligned with configs this PR itself can produce (Octo-Q P2-3).
  */
-const KEY_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const;
+const KEY_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+] as const;
 
 /** First non-empty value of the named env vars, or undefined. */
 function firstEnvValue(env: Record<string, string | undefined> | undefined): string | undefined {

@@ -16,22 +16,25 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 describe('maskKey', () => {
   it('masks the middle of a long key, keeping first 5 + last 4', () => {
-    expect(maskKey('sk-ihDN61JfoXy')).toBe('sk-ih****foXy')
+    expect(maskKey('sk-ihDN61JfoXyZa')).toBe('sk-ih****XyZa') // 16 chars
+    expect(maskKey('sk-ihDN61JfoXyZ')).toBe('****') // 15 chars: 9 visible = 60% boundary
+    expect(maskKey('sk-ihDN61JfoXy')).toBe('****') // 14 chars: 9 visible > 60%
   })
-  it('fully masks short/empty values (<= 12 chars would leak most of the value)', () => {
+  it('fully masks short/empty values (would leak most of the value)', () => {
     expect(maskKey('')).toBe('****')
     expect(maskKey(undefined)).toBe('****')
     expect(maskKey('short')).toBe('****')
-    expect(maskKey('sk-ihDN61Jfo')).toBe('****') // 12 chars: fully masked
+    expect(maskKey('sk-ihDN61Jfo')).toBe('****') // 12 chars
     expect(maskKey('sk-ihDN61Jf')).toBe('****')
+    expect(maskKey('sk-13def1b10d7')).toBe('****') // 15 chars: boundary
   })
 })
 
 describe('detectAuthSources', () => {
   it('reports config.apiKey with a mask (highest precedence)', () => {
-    const sources = detectAuthSources({ apiKey: 'sk-abcDEF12345', env: { ANTHROPIC_API_KEY: 'sk-other' } }, {}, NO_CREDS)
+    const sources = detectAuthSources({ apiKey: 'sk-abcDEF12345678', env: { ANTHROPIC_API_KEY: 'sk-other' } }, {}, NO_CREDS)
     expect(sources.map((s) => s.kind)).toEqual(['config.apiKey'])
-    expect(sources[0].masked).toBe('sk-ab****2345')
+    expect(sources[0].masked).toBe('sk-ab****5678')
   })
   it('falls back to sdk.env.ANTHROPIC_API_KEY', () => {
     const sources = detectAuthSources({ env: { ANTHROPIC_API_KEY: 'sk-env-key' } }, {}, NO_CREDS)
@@ -40,7 +43,12 @@ describe('detectAuthSources', () => {
   it('accepts sdk.env.ANTHROPIC_AUTH_TOKEN (third-party gateway credential var)', () => {
     const sources = detectAuthSources({ env: { ANTHROPIC_AUTH_TOKEN: 'sk-auth-token' } }, {}, NO_CREDS)
     expect(sources.map((s) => s.kind)).toEqual(['config.env'])
-    expect(sources[0].masked).toBe('sk-au****oken')
+  })
+  it('accepts CLAUDE_CODE_OAUTH_TOKEN (CLI CI-flow credential, importable via --from-claude)', () => {
+    const sources = detectAuthSources({ env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-oauth-credential' } }, {}, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['config.env'])
+    const proc = detectAuthSources({}, { CLAUDE_CODE_OAUTH_TOKEN: 'sk-oauth-credential' }, NO_CREDS)
+    expect(proc.map((s) => s.kind)).toEqual(['process.env'])
   })
   it('accepts ANTHROPIC_AUTH_TOKEN from the process env too', () => {
     const sources = detectAuthSources({}, { ANTHROPIC_AUTH_TOKEN: 'sk-proc-token' }, NO_CREDS)

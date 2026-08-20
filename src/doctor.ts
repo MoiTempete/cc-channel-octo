@@ -26,6 +26,7 @@ import {
 export interface DoctorEnv {
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_AUTH_TOKEN?: string;
+  CLAUDE_CODE_OAUTH_TOKEN?: string;
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;
 }
@@ -218,10 +219,10 @@ function mergeSdk(globalSdk: SdkAuthInput, botSdk: SdkAuthInput): SdkAuthInput {
   return merged;
 }
 
-/** First credential value across the two accepted env var names. */
+/** First credential value across the accepted env var names (mirrors auth-detect). */
 function firstCredential(env: Record<string, string> | undefined): string | undefined {
   if (!env) return undefined;
-  for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] as const) {
+  for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'] as const) {
     const v = env[name];
     if (typeof v === 'string' && v.length > 0) return v;
   }
@@ -349,9 +350,10 @@ export function doctorReport(
 
   // --- Environment ---
   const env = baseEnv as DoctorEnv;
-  const procCredential = env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN;
+  const procCredential =
+    env.ANTHROPIC_API_KEY ?? env.ANTHROPIC_AUTH_TOKEN ?? env.CLAUDE_CODE_OAUTH_TOKEN;
   lines.push('environment');
-  lines.push(`  ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN: ${procCredential ? `${maskKey(procCredential)} (inherited into the SDK subprocess)` : 'unset'}`);
+  lines.push(`  credential env (API_KEY/AUTH_TOKEN/OAUTH_TOKEN): ${procCredential ? `${maskKey(procCredential)} (inherited into the SDK subprocess)` : 'unset'}`);
   lines.push(`  ANTHROPIC_BASE_URL: ${env.ANTHROPIC_BASE_URL ? displayBaseUrl(env.ANTHROPIC_BASE_URL) : 'unset'}`);
   lines.push(`  ANTHROPIC_MODEL   : ${env.ANTHROPIC_MODEL ?? 'unset'}`);
   lines.push(`  OAuth login file  : ${credentialsPath} — ${existsSync(credentialsPath) ? 'present' : 'absent (macOS Keychain login is not statically detectable)'}`);
