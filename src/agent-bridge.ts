@@ -392,17 +392,18 @@ export async function* queryAgent(
           }
         }
         if (message.type === 'assistant') {
-          // R5 P1-4: SDK auth failures arrive as an ORDINARY assistant text
-          // block ("Not logged in · Please run /login") BEFORE a result with
-          // is_error — relaying it would stream the raw error to the channel.
-          // BUT SDKAssistantMessageError is a 10-value union (R6 P1-1):
-          // only the AUTH class marks an API-error block that must be
-          // suppressed — 'max_output_tokens' / 'rate_limit' / 'overloaded'
-          // assistant messages CARRY the model's real output, and dropping
-          // them silently discards a legitimate answer. Capture the auth
-          // marker for the throw below (when a result carries is_error with
-          // no status/text, the marker is the only discriminator) and relay
-          // everything else normally.
+          // R7 P1-1 (final): SDK auth failures arrive as an ORDINARY assistant
+          // text block ("Not logged in · Please run /login") BEFORE a result
+          // with is_error. EVERY assistant message carrying an `error` marker
+          // is a SYNTHETIC API-error block (proven against the bundled CLI:
+          // one factory emits {content: <error text>, error: <marker>} for
+          // all ten SDKAssistantMessageError values; max_output_tokens'
+          // real answer arrives FIRST as a separate ordinary message) —
+          // relaying ANY of them streams raw upstream error text to the
+          // channel. ALL markers are suppressed; the marker is captured and
+          // appended to the throw below (the discriminator for results with
+          // is_error but no status/text). Do NOT "relax" this to the auth
+          // class only — see the test matrix over all ten values.
           const assistantError = (message as { error?: unknown }).error;
           if (typeof assistantError === 'string' && assistantError.length > 0) {
             authMarker = assistantError; // all ten markers; isAuthError matches the auth class
