@@ -285,13 +285,12 @@ resolve `dist/cli.js` for you):
   when every bot has a source, 1 otherwise.
 - **`cc-channel-octo configure --gateway-url <url> --api-key <key>`** — writes
   `sdk.anthropicBaseUrl` + `sdk.apiKey` with mode 600 (atomic temp+rename). Add
-  `--bot <id>` to write a per-bot config instead of the global one. Without
-  `--api-key` the key is taken from `CC_OCTO_CONFIGURE_API_KEY` (explicit
-  opt-in); an ambient `ANTHROPIC_API_KEY` is only persisted after an explicit
-  `y` on a TTY (never off-TTY — "set the gateway URL" alone writes no secret);
-  otherwise you are prompted with hidden input. The key never appears in
-  `argv`, so nothing lands in shell history or `ps`; pressing Ctrl+C at the
-  prompt cancels cleanly (exit 130) and writes nothing.
+  `--bot <id>` to write a per-bot config instead of the global one. The command
+  is **non-interactive**: the key comes from `--api-key` or the
+  `CC_OCTO_CONFIGURE_API_KEY` env var (which keeps it out of `argv` and shell
+  history). An ambient `ANTHROPIC_API_KEY` is never harvested. Without a key it
+  fails with a message listing the alternatives (`CC_OCTO_CONFIGURE_API_KEY`,
+  `--from-claude`, or hand-editing the config).
 - **`cc-channel-octo configure --from-claude [--bot <id>]`** — the one-command
   answer for third-party LLM API users: copies the `env` block of
   `~/.claude/settings.json` (token + base URL + model mapping — `ANTHROPIC_*` /
@@ -313,12 +312,13 @@ headless/daemon contexts). Mitigations already in place: keys are never printed
 in logs or diagnosis output (only a `sk-****abcd` mask; `--from-claude` prints
 every imported value masked except a small allowlist of safe model/effort vars,
 and rejects an imported `ANTHROPIC_BASE_URL` that fails the SSRF policy), the
-key never lands in `argv` or shell history when you use the env-var or
-interactive paths (the ambient `ANTHROPIC_API_KEY` is only persisted after an
-explicit `y` on a TTY — "set the gateway URL" alone never silently writes a
-secret), and the gateway never echoes the key back to IM users. If a key is
-ever exposed (shell history, a pasted config, this README's examples), rotate
-it at the provider and re-run `configure`.
+key never lands in `argv` or shell history when you use the
+`CC_OCTO_CONFIGURE_API_KEY` env var (the ambient `ANTHROPIC_API_KEY` is never
+harvested — the operator supplies the secret explicitly via `--api-key`, the
+env var, `--from-claude`, or a hand-edited config), and the gateway never
+echoes the key back to IM users. If a key is ever exposed (shell history, a
+pasted config, this README's examples), rotate it at the provider and re-run
+`configure`.
 
 ### Per-group instructions
 

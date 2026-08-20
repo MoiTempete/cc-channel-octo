@@ -20,143 +20,12 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { stdin, stdout } from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DEFAULT_CONFIG_PATH } from './config.js';
 import { configure, configureFromClaude, DEFAULT_CLAUDE_SETTINGS_PATH } from './configure.js';
 import { maskKey } from './auth-detect.js';
 import { runDoctor } from './doctor.js';
-
-/**
- * Prompt for a secret on a TTY with echo disabled (raw mode), so an API key
- * never lands in argv, shell history, or the terminal scrollback. Non-TTY
- * (daemon-driven, piped) returns '' immediately — callers fall back to their
- * existing error path, so headless automation is unaffected. Ctrl+C / empty
- * input resolve to ''.
- */
-/**
- * Hidden-input byte state machine — PURE, unit-tested.
- *
- * Terminal escape handling:
- *   - ESC (0x1b) → escape state; the NEXT byte decides:
- *       '[' (0x5b) → CSI sequence: consume parameter (0x30-0x3f) and
- *                    intermediate (0x20-0x2f) bytes until a final byte
- *                    (0x40-0x7e). Covers arrows (ESC [ A), Home/End
- *                    (ESC [ H/F) and bracketed paste (ESC [ 200~ ... ESC [ 201~).
- *       anything else → a two-byte escape (ESC O etc.): dropped.
- *   - CSI ends on ANY final byte 0x40-0x7e — but NOT on '[' itself: 0x5b is
- *     the CSI INTRODUCER, and treating it as a terminator leaks the rest of
- *     every sequence into the secret (r4 B1, PTY-reproduced).
- */
-export type HiddenKeyState = 'normal' | 'escape' | 'csi';
-
-export type HiddenKeyAction =
-  | { type: 'append'; byte: number }
-  | { type: 'backspace' }
-  | { type: 'submit' }
-  | { type: 'cancel' }
-  | { type: 'ignore' };
-
-export function processHiddenKeyByte(
-  state: HiddenKeyState,
-  byte: number,
-): { state: HiddenKeyState; action: HiddenKeyAction } {
-  switch (state) {
-    case 'normal':
-      if (byte === 0x1b) return { state: 'escape', action: { type: 'ignore' } };
-      if (byte === 0x0a || byte === 0x0d) return { state: 'normal', action: { type: 'submit' } };
-      if (byte === 0x03) return { state: 'normal', action: { type: 'cancel' } };
-      if (byte === 0x7f || byte === 0x08) return { state: 'normal', action: { type: 'backspace' } };
-      if (byte >= 0x20 && byte !== 0x7f) return { state: 'normal', action: { type: 'append', byte } };
-      return { state: 'normal', action: { type: 'ignore' } };
-    case 'escape':
-      // '[' starts a CSI sequence; any other byte is a two-byte escape — drop.
-      return byte === 0x5b
-        ? { state: 'csi', action: { type: 'ignore' } }
-        : { state: 'normal', action: { type: 'ignore' } };
-    case 'csi':
-      if (byte >= 0x40 && byte <= 0x7e) return { state: 'normal', action: { type: 'ignore' } }; // final byte
-      if ((byte >= 0x30 && byte <= 0x3f) || (byte >= 0x20 && byte <= 0x2f)) {
-        return { state: 'csi', action: { type: 'ignore' } }; // parameter / intermediate byte
-      }
-      if (byte === 0x1b) return { state: 'escape', action: { type: 'ignore' } }; // nested ESC
-      return { state: 'normal', action: { type: 'ignore' } }; // unexpected byte — drop and bail
-  }
-}
-
-export function readHiddenSecret(prompt: string): Promise<string> {
-  return new Promise((resolve) => {
-    if (!stdin.isTTY) return resolve('');
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdout.write(prompt);
-    // Accumulate BYTES (not chars): decoding per byte would garble multi-byte
-    // UTF-8 (a pasted key with a BOM or CJK chars). Decode once on Enter.
-    const input: Buffer[] = [];
-    let state: HiddenKeyState = 'normal';
-    const onData = (chunk: Buffer): void => {
-      for (const byte of chunk) {
-        const r = processHiddenKeyByte(state, byte);
-        state = r.state;
-        if (r.action.type === 'submit' || r.action.type === 'cancel') {
-          const ok = r.action.type === 'submit';
-          stdin.setRawMode(false);
-          stdin.pause();
-          stdin.removeListener('data', onData);
-          stdout.write('\n');
-          resolve(ok ? Buffer.concat(input).toString('utf8') : '');
-          return;
-        }
-        if (r.action.type === 'backspace') {
-          popUtf8Char(input); // backspace removes one full character
-        } else if (r.action.type === 'append') {
-          input.push(Buffer.from([r.action.byte]));
-        }
-      }
-    };
-    stdin.on('data', onData);
-  });
-}
-
-/**
- * Drop the trailing UTF-8 character from a byte array: backspace in raw mode
- * arrives as one DEL byte, but a multi-byte char is several bytes — popping a
- * single byte would leave a broken half-character in the buffer. Walk back
- * past continuation bytes (0x80–0xBF) to the leading byte and remove the whole
- * sequence.
- */
-function popUtf8Char(input: Buffer[]): void {
-  if (input.length === 0) return;
-  let i = input.length - 1;
-  while (i > 0 && input[i][0] >= 0x80 && input[i][0] <= 0xbf) i--;
-  input.length = i; // removes input[i] and everything after it
-}
-
-/**
- * Simple y/N confirmation on a TTY (defaults to no). Non-TTY returns false so
- * headless automation never gets a silent "yes". Used where a side effect
- * would persist a secret.
- */
-export function confirmYesNo(prompt: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (!stdin.isTTY) return resolve(false);
-    stdin.setRawMode(false);
-    stdin.resume();
-    stdout.write(prompt);
-    const onData = (chunk: Buffer): void => {
-      const s = String(chunk);
-      if (s.includes('\n') || s.includes('\r')) {
-        const answer = s.replace(/[\r\n]/g, '').trim().toLowerCase();
-        stdin.pause();
-        stdin.removeListener('data', onData);
-        stdout.write('\n');
-        resolve(/^y(es)?$/.test(answer));
-      }
-    };
-    stdin.on('data', onData);
-  });
-}
 
 export interface SupervisorPaths {
   baseDir: string;
@@ -603,7 +472,7 @@ Usage:
   cc-channel-octo status                 show running state
   cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
   cc-channel-octo doctor                 diagnose Claude authentication for every bot (static, no network)
-  cc-channel-octo configure --gateway-url <url> [--api-key <key>] [--model <model>] [--api-url <octo-server-url>] [--bot <id>]   write LLM gateway + key to the global config (or a per-bot config with --bot); key also via CC_OCTO_CONFIGURE_API_KEY or ANTHROPIC_API_KEY
+  cc-channel-octo configure --gateway-url <url> [--api-key <key>] [--model <model>] [--api-url <octo-server-url>] [--bot <id>]   write LLM gateway + key to the global config (or a per-bot config with --bot); key via --api-key or CC_OCTO_CONFIGURE_API_KEY (non-interactive)
   cc-channel-octo configure --from-claude [--bot <id>]   import the env block of ~/.claude/settings.json (token + base URL + model mapping) into sdk.env
   cc-channel-octo version                print the version
 
@@ -697,38 +566,17 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
           return 2;
         }
       }
-      // Key resolution: explicit --api-key first, then the dedicated
-      // CC_OCTO_CONFIGURE_API_KEY env var (both explicit opt-ins — the key
-      // never appears in argv). The ambient ANTHROPIC_API_KEY is only harvested
-      // after an explicit yes on a TTY: "I only wanted to set the gateway URL"
-      // must not silently persist a secret. Without any source, prompt hidden.
-      let resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
-      let keySource = apiKey
+      // Key resolution is deliberately NON-interactive: --api-key or the
+      // dedicated CC_OCTO_CONFIGURE_API_KEY env var (which keeps the secret
+      // out of argv / shell history). No TTY prompt, no ambient harvest — the
+      // operator provides the secret explicitly (or uses --from-claude /
+      // hand-edits config.json). Missing → a clear error with the alternatives.
+      const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
+      const keySource = apiKey
         ? '--api-key'
         : process.env.CC_OCTO_CONFIGURE_API_KEY
           ? 'CC_OCTO_CONFIGURE_API_KEY'
           : 'none';
-      if (!resolvedApiKey && process.env.ANTHROPIC_API_KEY && stdin.isTTY) {
-        const answer = await confirmYesNo(
-          'ANTHROPIC_API_KEY is set in the environment. Persist it to the config? [y/N] ',
-        );
-        if (answer) {
-          resolvedApiKey = process.env.ANTHROPIC_API_KEY;
-          keySource = 'ANTHROPIC_API_KEY (confirmed)';
-        }
-      }
-      if (!resolvedApiKey && stdin.isTTY) {
-        resolvedApiKey = await readHiddenSecret('API key (hidden): ');
-        if (resolvedApiKey) {
-          keySource = 'interactive prompt';
-        } else {
-          // Empty interactive input = deliberate cancel (Ctrl+C / bare Enter),
-          // not a missing-argument mistake. Report it as a cancel, exit 130
-          // (128 + SIGINT) and write nothing.
-          console.log('cc-channel-octo: cancelled');
-          return 130;
-        }
-      }
       const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
       try {
         configure(gatewayUrl ?? '', resolvedApiKey, configPath, { model, apiUrl });
@@ -738,6 +586,18 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
         );
         return 0;
       } catch (err) {
+        // The key is required; say so and point at the non-argv paths instead
+        // of just echoing "configure: --api-key is required".
+        if (err instanceof Error && err.message.includes('--api-key is required')) {
+          console.error(
+            'cc-channel-octo: configure requires an API key. Provide it as:\n' +
+            '  - CC_OCTO_CONFIGURE_API_KEY=<key> cc-channel-octo configure --gateway-url <url>   (key stays out of argv/history)\n' +
+            '  - cc-channel-octo configure --gateway-url <url> --api-key <key>\n' +
+            '  - cc-channel-octo configure --from-claude   (import the env block of ~/.claude/settings.json)\n' +
+            '  - or hand-edit the config.json (chmod 600)',
+          );
+          return 2;
+        }
         console.error(`cc-channel-octo: ${(err as Error).message}`);
         return 2;
       }

@@ -14,73 +14,7 @@ import {
   parseArgs, isAlive, readPid, readPidRecord, writePid, removePid,
   resolveOwnedPid, resolveSupervisorPaths,
   readVersion, parseVersion, run, assertValidBotId, displayImportedValue,
-  processHiddenKeyByte, type HiddenKeyState,
 } from '../cli.js';
-
-/**
- * Drive the hidden-input byte state machine over a byte sequence and return
- * the actions it produced (append bytes reassembled as a string).
- */
-function runMachine(bytes: number[]): { state: HiddenKeyState; out: string; done: 'submit' | 'cancel' | null } {
-  let state: HiddenKeyState = 'normal';
-  const appends: Buffer[] = [];
-  let done: 'submit' | 'cancel' | null = null;
-  for (const b of bytes) {
-    const r = processHiddenKeyByte(state, b);
-    state = r.state;
-    if (r.action.type === 'append') appends.push(Buffer.from([r.action.byte]));
-    else if (r.action.type === 'backspace') {
-      // Mirror popUtf8Char: remove one full UTF-8 character.
-      let i = appends.length - 1;
-      while (i > 0 && appends[i][0] >= 0x80 && appends[i][0] <= 0xbf) i--;
-      appends.length = i;
-    } else if (r.action.type === 'submit' || r.action.type === 'cancel') {
-      done = r.action.type;
-      break;
-    }
-  }
-  return { state, out: Buffer.concat(appends).toString('utf8'), done };
-}
-const ESC = 0x1b, CSI = 0x5b; // '['
-
-describe('processHiddenKeyByte (pure state machine)', () => {
-  it('appends printable bytes and submits on Enter (CRLF paste)', () => {
-    const r = runMachine([...Buffer.from('sk-abcdef\r\n')]);
-    expect(r.out).toBe('sk-abcdef');
-    expect(r.done).toBe('submit');
-  });
-  it('drops an arrow key (ESC [ A) entirely instead of leaking bytes', () => {
-    const r = runMachine([...Buffer.from('sk'), ESC, CSI, 0x41, ...Buffer.from('xyz'), 0x0d]);
-    expect(r.out).toBe('skxyz'); // 'A' must NOT leak (r4 B1 regression)
-    expect(r.done).toBe('submit');
-  });
-  it('drops Home/End (ESC [ H / ESC [ F) and cursor-prefix sequences', () => {
-    expect(runMachine([...Buffer.from('a'), ESC, CSI, 0x48, ...Buffer.from('b'), 0x0d]).out).toBe('ab');
-    expect(runMachine([...Buffer.from('a'), ESC, CSI, 0x46, ...Buffer.from('b'), 0x0d]).out).toBe('ab');
-  });
-  it('drops bracketed-paste markers (ESC [ 2 0 0 ~ … ESC [ 2 0 1 ~) keeping only the payload', () => {
-    const paste = [...Buffer.from('sk-pasted')];
-    const open = [ESC, CSI, 0x32, 0x30, 0x30, 0x7e];
-    const close = [ESC, CSI, 0x32, 0x30, 0x31, 0x7e];
-    const r = runMachine([...open, ...paste, ...close, 0x0d]);
-    expect(r.out).toBe('sk-pasted');
-    expect(r.done).toBe('submit');
-  });
-  it('drops a two-byte escape (ESC O, e.g. F-keys) without entering CSI', () => {
-    const r = runMachine([...Buffer.from('x'), ESC, 0x4f, ...Buffer.from('y'), 0x0d]);
-    expect(r.out).toBe('xy');
-  });
-  it('decodes multi-byte UTF-8 intact and backspace removes a whole character', () => {
-    const key = Buffer.from('sk-ключé2026');
-    const r = runMachine([...key, 0x7f, 0x7f, ...Buffer.from('Z'), 0x0d]);
-    // backspace twice removes '6' and '2' (ASCII), leaving 'sk-ключé20' + 'Z'
-    expect(r.out).toBe('sk-ключé20Z');
-  });
-  it('cancels on Ctrl+C (0x03)', () => {
-    const r = runMachine([...Buffer.from('sk-abc'), 0x03]);
-    expect(r.done).toBe('cancel');
-  });
-});
 
 describe('parseArgs', () => {
   it('defaults: no flags', () => {
@@ -395,16 +329,17 @@ describe('run configure with env var fallback', () => {
     try {
       const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
       expect(code).toBe(2);
-      expect(spy).toHaveBeenCalledWith(expect.stringContaining('required'));
+      expect(spy).toHaveBeenCalledWith(expect.stringContaining('requires an API key'));
     } finally {
       spy.mockRestore();
     }
   });
 
-  it('does NOT harvest an ambient ANTHROPIC_API_KEY off-TTY (no silent secret persist)', async () => {
-    // The ANTHROPIC_API_KEY fallback requires an explicit yes on a TTY; under
-    // vitest stdin is not a TTY, so the key must be left alone and the command
-    // must fail with the required-key error instead of writing it to disk.
+  it('never harvests an ambient ANTHROPIC_API_KEY (configure is non-interactive)', async () => {
+    // Key sources are strictly --api-key / CC_OCTO_CONFIGURE_API_KEY /
+    // --from-claude / hand-edited files. The ambient ANTHROPIC_API_KEY must be
+    // left alone even on a TTY, and the command fails with the guidance error
+    // instead of writing anything.
     delete process.env.CC_OCTO_CONFIGURE_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'sk-do-not-persist-me';
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -412,7 +347,7 @@ describe('run configure with env var fallback', () => {
     try {
       const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
       expect(code).toBe(2);
-      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('required'));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('requires an API key'));
       expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('configured gateway'));
       expect(existsSync(cfgPath)).toBe(false); // nothing written
     } finally {
