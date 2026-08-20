@@ -2,11 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { configure, normalizeGatewayUrl } from '../configure.js'
+import { configure, configureFromClaude, normalizeGatewayUrl } from '../configure.js'
 
 let dir: string
 let cfgPath: string
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'ccfg-')); cfgPath = join(dir, 'config.json') })
+let claudeSettingsPath: string
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'ccfg-'))
+  cfgPath = join(dir, 'config.json')
+  claudeSettingsPath = join(dir, 'claude-settings.json')
+})
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 describe('configure', () => {
@@ -81,6 +86,51 @@ describe('configure', () => {
   })
   it('rejects an unsafe --api-url', () => {
     expect(() => configure('https://gw.test', 'sk', cfgPath, { apiUrl: 'ftp://evil' })).toThrow()
+  })
+})
+
+describe('configureFromClaude', () => {
+  it('imports the ANTHROPIC_*/CLAUDE_CODE_* env block into sdk.env, mode 600', () => {
+    writeFileSync(claudeSettingsPath, JSON.stringify({
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'sk-secretToken',
+        ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+        ANTHROPIC_MODEL: 'deepseek-v4-flash[1M]',
+        CLAUDE_CODE_EFFORT_LEVEL: 'max',
+        MY_PERSONAL_VAR: 'do-not-import',
+      },
+    }))
+    const result = configureFromClaude(claudeSettingsPath, cfgPath)
+    expect(Object.keys(result.imported)).toEqual([
+      'ANTHROPIC_AUTH_TOKEN',
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_MODEL',
+      'CLAUDE_CODE_EFFORT_LEVEL',
+    ])
+    expect(result.skipped).toEqual(['MY_PERSONAL_VAR'])
+    const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+    expect(parsed.sdk.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-secretToken')
+    expect(parsed.sdk.env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic')
+    expect(parsed.sdk.env.MY_PERSONAL_VAR).toBeUndefined()
+    expect(statSync(cfgPath).mode & 0o777).toBe(0o600)
+  })
+  it('merges into an existing config, keeping existing sdk.env keys and other fields', () => {
+    writeFileSync(cfgPath, JSON.stringify({ apiUrl: 'https://octo.example.com', sdk: { env: { OCTO_BOT_ID: 'x' } } }))
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'sk-new' } }))
+    configureFromClaude(claudeSettingsPath, cfgPath)
+    const parsed = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+    expect(parsed.apiUrl).toBe('https://octo.example.com')
+    expect(parsed.sdk.env.OCTO_BOT_ID).toBe('x')
+    expect(parsed.sdk.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-new')
+  })
+  it('throws a clear error when the settings file is missing', () => {
+    expect(() => configureFromClaude(join(dir, 'nope.json'), cfgPath)).toThrow(/does not exist/)
+  })
+  it('throws when the env block is absent or empty of importable vars', () => {
+    writeFileSync(claudeSettingsPath, JSON.stringify({ effortLevel: 'xhigh' }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/no env block/)
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { FOO: 'bar' } }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/no ANTHROPIC_\* \/ CLAUDE_CODE_\* env vars/)
   })
 })
 

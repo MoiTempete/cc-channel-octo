@@ -18,11 +18,11 @@ import {
 
 describe('parseArgs', () => {
   it('defaults: no flags', () => {
-    expect(parseArgs(['start'])).toEqual({ cmd: 'start', foreground: false, timeoutMs: 10_000 });
+    expect(parseArgs(['start'])).toEqual({ cmd: 'start', foreground: false, timeoutMs: 10_000, fromClaude: false });
   });
 
   it('empty argv yields empty cmd', () => {
-    expect(parseArgs([])).toEqual({ cmd: '', foreground: false, timeoutMs: 10_000 });
+    expect(parseArgs([])).toEqual({ cmd: '', foreground: false, timeoutMs: 10_000, fromClaude: false });
   });
 
   it('--foreground and -f both set foreground', () => {
@@ -52,6 +52,20 @@ describe('parseArgs', () => {
   it('throws when --model or --api-url is missing a value', () => {
     expect(() => parseArgs(['configure', '--model'])).toThrow(/--model requires a value/);
     expect(() => parseArgs(['configure', '--api-url', '--api-key=k'])).toThrow(/--api-url requires a value/);
+  });
+
+  it('parses --bot (space and = forms)', () => {
+    expect(parseArgs(['configure', '--bot', 'default']).bot).toBe('default');
+    expect(parseArgs(['configure', '--bot=ops']).bot).toBe('ops');
+  });
+
+  it('throws when --bot is missing a value', () => {
+    expect(() => parseArgs(['configure', '--bot'])).toThrow(/--bot requires a value/);
+  });
+
+  it('parses --from-claude as a flag', () => {
+    expect(parseArgs(['configure', '--from-claude']).fromClaude).toBe(true);
+    expect(parseArgs(['configure']).fromClaude).toBe(false);
   });
 });
 

@@ -20,10 +20,46 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { openSync, readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { stdin, stdout } from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DEFAULT_CONFIG_PATH } from './config.js';
-import { configure } from './configure.js';
+import { configure, configureFromClaude, DEFAULT_CLAUDE_SETTINGS_PATH } from './configure.js';
+import { maskKey } from './auth-detect.js';
+import { runDoctor } from './doctor.js';
+
+/**
+ * Prompt for a secret on a TTY with echo disabled (raw mode), so an API key
+ * never lands in argv, shell history, or the terminal scrollback. Non-TTY
+ * (daemon-driven, piped) returns '' immediately — callers fall back to their
+ * existing error path, so headless automation is unaffected. Ctrl+C / empty
+ * input resolve to ''.
+ */
+export function readHiddenSecret(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    if (!stdin.isTTY) return resolve('');
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdout.write(prompt);
+    let input = '';
+    const onData = (chunk: Buffer): void => {
+      const s = String(chunk);
+      if (s === '\n' || s === '\r' || s === '\u0003') {
+        // Enter submits; Ctrl+C cancels (both resolve to the buffer, '' on cancel).
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        stdout.write('\n');
+        resolve(s === '\u0003' ? '' : input);
+      } else if (s === '\u007f' || s === '\b') {
+        input = input.slice(0, -1); // backspace
+      } else {
+        input += s;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
 
 export interface SupervisorPaths {
   baseDir: string;
@@ -61,6 +97,10 @@ export interface ParsedArgs {
   model?: string;
   /** `configure --api-url <url>` — Octo IM server url (cc top-level apiUrl). */
   apiUrl?: string;
+  /** `configure --bot <id>` — write to the per-bot config instead of the global one. */
+  bot?: string;
+  /** `configure --from-claude` — import the env block of ~/.claude/settings.json. */
+  fromClaude: boolean;
 }
 
 /**
@@ -103,6 +143,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let apiKey: string | undefined;
   let model: string | undefined;
   let apiUrl: string | undefined;
+  let bot: string | undefined;
+  let fromClaude = false;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--foreground' || a === '-f') {
@@ -142,11 +184,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
       apiUrl = next;
     } else if (a.startsWith('--api-url=')) {
       apiUrl = a.slice('--api-url='.length);
+    } else if (a === '--bot') {
+      const next = rest[++i];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('configure: --bot requires a value')
+      }
+      bot = next;
+    } else if (a.startsWith('--bot=')) {
+      bot = a.slice('--bot='.length);
+    } else if (a === '--from-claude') {
+      fromClaude = true;
     } else if (!a.startsWith('-') && version === undefined) {
       version = a;
     }
   }
-  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version, gatewayUrl, apiKey, model, apiUrl };
+  return { cmd, foreground, timeoutMs: timeoutSec * 1000, version, gatewayUrl, apiKey, model, apiUrl, bot, fromClaude };
 }
 
 /**
@@ -420,12 +472,17 @@ Usage:
   cc-channel-octo restart                stop (if running) then start
   cc-channel-octo status                 show running state
   cc-channel-octo upgrade [<version>]    npm install -g the gateway (default latest) then restart
-  cc-channel-octo configure --gateway-url <url> [--api-key <key>] [--model <model>] [--api-url <octo-server-url>]   write LLM gateway + key (+ optional model / Octo server url) to config (key also via CC_OCTO_CONFIGURE_API_KEY)
+  cc-channel-octo doctor                 diagnose Claude authentication for every bot (static, no network)
+  cc-channel-octo configure --gateway-url <url> [--api-key <key>] [--model <model>] [--api-url <octo-server-url>] [--bot <id>]   write LLM gateway + key to the global config (or a per-bot config with --bot); key also via CC_OCTO_CONFIGURE_API_KEY or ANTHROPIC_API_KEY
+  cc-channel-octo configure --from-claude [--bot <id>]   import the env block of ~/.claude/settings.json (token + base URL + model mapping) into sdk.env
   cc-channel-octo version                print the version
 
 Paths (under ~/.cc-channel-octo):
   pid : cc-channel-octo.pid
   log : logs/gateway.log
+
+Source checkout: 'npm run doctor' / 'npm run setup' / 'npm run configure' are
+shortcuts for the subcommands above (setup = configure --from-claude).
 
 POSIX only (macOS/Linux). On Windows, run under a service manager.`;
 }
@@ -440,7 +497,10 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
     console.error(`cc-channel-octo: ${(err as Error).message}`);
     return 2;
   }
-  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey, model, apiUrl } = parsed;
+  const { cmd, foreground, timeoutMs, version, gatewayUrl, apiKey, model, apiUrl, bot, fromClaude } = parsed;
+  // Real CLI invocations call run() without a baseDir (undefined); resolve it the
+  // same way resolveSupervisorPaths does so --bot always addresses a real file.
+  const effBaseDir = baseDir ?? dirname(DEFAULT_CONFIG_PATH);
   const paths = resolveSupervisorPaths(baseDir);
   switch (cmd) {
     case 'start':
@@ -454,12 +514,71 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
       return cmdStatus(paths, procId);
     case 'upgrade':
       return cmdUpgrade(paths, timeoutMs, procId, version);
+    case 'doctor':
+      return runDoctor(baseDir ? join(baseDir, 'config.json') : undefined);
     case 'configure': {
-      const resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
-      const configPath = baseDir ? join(baseDir, 'config.json') : undefined;
+      // --from-claude: copy the whole env block of ~/.claude/settings.json
+      // (token + base URL + model mapping) into sdk.env — the one-command path
+      // for third-party LLM API users. Mutually exclusive with the explicit
+      // gateway/key flags; combining them is an operator error, not a guess.
+      if (fromClaude) {
+        if (gatewayUrl || apiKey) {
+          console.error('cc-channel-octo: --from-claude cannot be combined with --gateway-url/--api-key');
+          return 2;
+        }
+        const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
+        try {
+          const { imported, skipped } = configureFromClaude(
+            DEFAULT_CLAUDE_SETTINGS_PATH,
+            configPath,
+          );
+          console.log(
+            `cc-channel-octo: imported ${Object.keys(imported).length} env var(s) from ${DEFAULT_CLAUDE_SETTINGS_PATH} ` +
+            `into ${configPath}:`,
+          );
+          for (const [k, v] of Object.entries(imported)) {
+            const shown = /TOKEN|KEY|SECRET/i.test(k) ? maskKey(v) : v;
+            console.log(`  ${k}=${shown}`);
+          }
+          if (skipped.length > 0) {
+            console.log(`  (skipped non-ANTHROPIC_/CLAUDE_CODE_ vars: ${skipped.join(', ')})`);
+          }
+          return 0;
+        } catch (err) {
+          console.error(`cc-channel-octo: ${(err as Error).message}`);
+          return 2;
+        }
+      }
+      // Key resolution chain: explicit --api-key first (never echo it in argv
+      // advice — prefer CC_OCTO_CONFIGURE_API_KEY), then the dedicated env var,
+      // then the ambient ANTHROPIC_API_KEY so a "copy my current environment
+      // into the config" flow works with zero extra steps. When no source has a
+      // key, prompt interactively (hidden input) instead of failing — the key
+      // still never lands in argv or shell history. The chosen source is
+      // reported so the operator knows where the secret came from.
+      let resolvedApiKey =
+        apiKey ??
+        process.env.CC_OCTO_CONFIGURE_API_KEY ??
+        process.env.ANTHROPIC_API_KEY ??
+        '';
+      let keySource = apiKey
+        ? '--api-key'
+        : process.env.CC_OCTO_CONFIGURE_API_KEY
+          ? 'CC_OCTO_CONFIGURE_API_KEY'
+          : process.env.ANTHROPIC_API_KEY
+            ? 'ANTHROPIC_API_KEY'
+            : 'none';
+      if (!resolvedApiKey) {
+        resolvedApiKey = await readHiddenSecret('API key (hidden): ');
+        if (resolvedApiKey) keySource = 'interactive prompt';
+      }
+      const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
       try {
         configure(gatewayUrl ?? '', resolvedApiKey, configPath, { model, apiUrl });
-        console.log('cc-channel-octo: configured gateway + api key');
+        console.log(
+          `cc-channel-octo: configured gateway + api key (source: ${keySource}, ` +
+          `written to ${configPath})`,
+        );
         return 0;
       } catch (err) {
         console.error(`cc-channel-octo: ${(err as Error).message}`);

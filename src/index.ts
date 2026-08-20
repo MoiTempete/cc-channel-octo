@@ -28,6 +28,7 @@ import type { BotMessage } from './octo/types.js';
 import { resolveContent, tryResolveFile, resolveHistoricalMessagePlaceholder } from './inbound.js';
 import { downloadInboundImage, MAX_IMAGES_PER_MESSAGE } from './media-inbound.js';
 import { handleCommand } from './commands.js';
+import { detectAuthSources, isAuthError } from './auth-detect.js';
 import { resolveGroupInstructions } from './group-md.js';
 import { GroupMdCache, ThreadMdCache, DEFAULT_GROUP_MD_TTL_MS } from './group-md-cache.js';
 import { GroupMdWriteback, ThreadMdWriteback } from './group-md-writeback.js';
@@ -170,6 +171,32 @@ async function startBot(config: ReturnType<typeof loadConfig>, multi: boolean): 
     `sdk.permissionMode=${config.sdk.permissionMode}, ` +
     `rateLimit=${config.rateLimit.maxPerMinute} req/min`,
   );
+
+  // --- Claude auth preflight (boot-time, not first-message-time) ---
+  // Surface a missing authentication source at startup instead of letting the
+  // first IM message fail with "Not logged in". Detection is static: config
+  // apiKey/env, inherited process env, or the host OAuth login file. A
+  // Keychain-only OAuth login has no static file to probe, so this is a
+  // WARNING, never a boot failure (same spirit as the Q12 permission warning).
+  const authSources = detectAuthSources(config.sdk, process.env);
+  if (authSources.length === 0) {
+    console.warn(
+      `[cc-channel-octo] ${label}WARNING: no Claude authentication detected for this bot — ` +
+      `the first message will fail with "Not logged in". Fix with one of:\n` +
+      `  - npm run setup (source) / cc-channel-octo configure --from-claude (global)  (import the env block of ~/.claude/settings.json: token + base URL + model mapping)\n` +
+      `  - cc-channel-octo configure --gateway-url <url> --api-key <key>  (writes sdk.apiKey; key also via CC_OCTO_CONFIGURE_API_KEY)\n` +
+      `  - add sdk.apiKey or sdk.env to ${config.baseDir}/${config.botId ?? 'default'}/config.json\n` +
+      `  - export ANTHROPIC_API_KEY in the shell that starts the gateway (inherited into the SDK subprocess)\n` +
+      `  - run \`claude\` + \`/login\` on this host (OAuth; not statically detectable when stored in the macOS Keychain)\n` +
+      `  - run \`cc-channel-octo doctor\` for a full diagnosis`,
+    );
+  } else {
+    console.log(
+      `[cc-channel-octo] ${label}Claude auth: ${authSources
+        .map((s) => (s.masked ? `${s.kind} (${s.masked})` : s.kind))
+        .join(', ')}`,
+    );
+  }
 
   // --- Q3: per-session cwd cleanup (7d TTL) ---
   cleanupExpiredCwds(cwdBase);
@@ -1026,6 +1053,19 @@ export async function handleMessage(
 
     } catch (err) {
       console.error(`[cc-channel-octo] Error processing message (session=${result.sessionKey}):`, String(err));
+      // Auth failures (the SDK subprocess reports "Not logged in" / a 401 from
+      // the upstream) are an operator problem, not a transient one: tag the log
+      // so it's greppable, and give the bot owner setup guidance in the reply
+      // while everyone else gets a neutral message (never echo the raw error —
+      // it could contain environment details).
+      const authError = isAuthError(err);
+      if (authError) {
+        console.error(
+          `[cc-channel-octo] Claude authentication failure — run \`npm run doctor\` (source) / \`cc-channel-octo doctor\` (global), ` +
+          `then fix with \`npm run setup\` (source) / \`cc-channel-octo configure --from-claude\` (global) ` +
+          `or \`--gateway-url <url> --api-key <key>\`, and restart.`,
+        );
+      }
       // #115: attribute a FAILED cron fire to its task. handleMessage swallows
       // errors here (it sends a user-facing reply, never rethrows), so the
       // scheduler's promise can't observe failure — surface it at the point we
@@ -1036,12 +1076,19 @@ export async function handleMessage(
       }
       // Best-effort error reply
       try {
+        const isOwner = router.getOwnerUid() !== '' && msg.from_uid === router.getOwnerUid();
         await sendMessage({
           apiUrl: config.apiUrl,
           botToken: config.botToken,
           channelId,
           channelType,
-          content: 'An error occurred while processing your message. Please try again.',
+          content: authError
+            ? isOwner
+              ? '⚠️ The bot is not authenticated with Claude (the agent reported "Not logged in"). ' +
+                'Please run `npm run setup` (source) / `cc-channel-octo configure --from-claude` (global) ' +
+                'and restart the gateway. Run `npm run doctor` / `cc-channel-octo doctor` for a diagnosis.'
+              : 'The bot is currently unavailable. Please try again later.'
+            : 'An error occurred while processing your message. Please try again.',
         });
       } catch {
         /* swallow — don't crash on reply failure */

@@ -34,7 +34,11 @@ Users talk to a bot in Octo (DM or group @mention). The bot sends messages to Cl
 - Node.js ≥ 22
 - An Octo bot token (`bf_*`)
 - Claude Code CLI installed (`npm i -g @anthropic-ai/claude-code`)
-- `ANTHROPIC_API_KEY` set in your environment
+- Claude authentication — **one of**: an `ANTHROPIC_API_KEY` exported in the shell
+  that runs the gateway, `sdk.apiKey` / `sdk.env` in the config (see
+  [Claude authentication](#claude-authentication)), or a host `claude` OAuth login.
+  With none of them, every message fails with `Not logged in` — run
+  `cc-channel-octo doctor` to diagnose.
 
 ### Install & Run
 
@@ -200,6 +204,7 @@ configurable.
 | `bots` | `[{id:"default"}]` | Which bots to run; each `id` selects its subtree + per-bot config. |
 | *(dirs)* | *(derived)* | `data`/`workspace`/`memory`/`skills` are always `<baseDir>/<id>/…` — not configurable. |
 | `sdk.model` | *(SDK default)* | Claude model override |
+| `sdk.apiKey` | *(unset)* | Claude API key, forwarded to the SDK subprocess as `ANTHROPIC_API_KEY` (overrides `sdk.env`). **Secret** — write it via `cc-channel-octo configure` (mode 600) or hand-edit + `chmod 600`. See [Claude authentication](#claude-authentication). |
 | `sdk.allowedTools` | `"*"` | Either `"*"` (allow every tool the SDK exposes) or an explicit string array whitelist. |
 | `sdk.permissionMode` | `bypassPermissions` | SDK permission mode |
 | `sdk.maxTurns` | *(SDK default)* | Max agentic turns per query |
@@ -240,6 +245,73 @@ resolve to a private/link-local address. An unsafe value fails fast at startup.
 ```
 
 Leave the field unset to talk to Anthropic's public endpoint directly.
+
+A third-party gateway that authenticates with an API key also needs the key (and
+usually a model string). Set `sdk.apiKey` (or `sdk.env.ANTHROPIC_API_KEY`) and
+`sdk.model` — the gateway forwards them to the SDK subprocess exactly like
+`ANTHROPIC_BASE_URL`, so the bot can match the environment you already use in
+your own Claude Code sessions:
+
+```jsonc
+{
+  "sdk": {
+    "apiKey": "sk-…",
+    "anthropicBaseUrl": "https://llm-gw.example.com",
+    "model": "deepseek-v4-flash[1m]"
+  }
+}
+```
+
+### Claude authentication
+
+The SDK subprocess needs a credential from **one of** four sources (checked by
+the gateway at boot and reported per bot in the startup log):
+
+| Source | Where | Notes |
+|--------|-------|-------|
+| `sdk.apiKey` | config `sdk` block | Forwarded as `ANTHROPIC_API_KEY`; highest precedence. |
+| `sdk.env.ANTHROPIC_API_KEY` | config `sdk.env` | Same forwarding path. |
+| `ANTHROPIC_API_KEY` in the gateway's shell | exported before `npm start` / `cc-channel-octo start` | Inherited into the SDK subprocess automatically. |
+| `claude` OAuth login on the host | `~/.claude/.credentials.json` / macOS Keychain | Only the file form is statically detectable; a Keychain-only login can't be probed without calling the CLI, so the gateway may warn despite a working login. |
+
+With **none** of these, every message fails with `Not logged in · Please run
+/login` (the IM user sees a neutral error; the bot owner gets setup guidance).
+Three tools help you get this right (in a source checkout, the same commands
+are `npm run doctor` / `npm run setup` / `npm run configure` — npm scripts
+resolve `dist/cli.js` for you):
+
+- **`cc-channel-octo doctor`** — static diagnosis (no network): per-bot verdict,
+  auth sources with masked keys, config file permissions, environment. Exit 0
+  when every bot has a source, 1 otherwise.
+- **`cc-channel-octo configure --gateway-url <url> --api-key <key>`** — writes
+  `sdk.anthropicBaseUrl` + `sdk.apiKey` with mode 600 (atomic temp+rename). Add
+  `--bot <id>` to write a per-bot config instead of the global one. Omit
+  `--api-key` to take the key from `CC_OCTO_CONFIGURE_API_KEY` or
+  `ANTHROPIC_API_KEY` (the chosen source is printed), or leave it out entirely
+  on a TTY to be prompted (hidden input) — the key never appears in `argv`, so
+  nothing lands in shell history or `ps`.
+- **`cc-channel-octo configure --from-claude [--bot <id>]`** — the one-command
+  answer for third-party LLM API users: copies the `env` block of
+  `~/.claude/settings.json` (token + base URL + model mapping — `ANTHROPIC_*` /
+  `CLAUDE_CODE_*` vars) into the target config's `sdk.env`. Explicitly NOT an
+  auto-inherit: only this command reads your personal file, only the
+  `ANTHROPIC_*`/`CLAUDE_CODE_*` subset is copied (so unrelated personal env
+  stays out of the bot), the result is written with mode 600, and secret vars
+  print masked. Re-run it after changing `~/.claude/settings.json` to sync.
+- **Boot preflight** — the gateway warns loudly at startup when a bot has no
+  detectable source, instead of failing on the first message. It never blocks
+  boot (a Keychain-only OAuth login is undetectable statically).
+
+**Keeping the key safe.** The key lives as plaintext either in your config
+(`chmod 600`, like every file under `~/.cc-channel-octo/` — the gateway warns on
+world-readable configs) or in the gateway process environment. There is no
+encrypted/Keychain storage for it (macOS Keychain is not used by design — the
+SDK subprocess needs the raw key either way, and Keychain reads fail in
+headless/daemon contexts). Mitigations already in place: keys are never printed
+in logs or diagnosis output (only a `sk-****abcd` mask), `configure` refuses to
+take the key from `argv` in normal use, and the gateway never echoes the key back
+to IM users. If a key is ever exposed (shell history, a pasted config, this
+README's examples), rotate it at the provider and re-run `configure`.
 
 ### Per-group instructions
 

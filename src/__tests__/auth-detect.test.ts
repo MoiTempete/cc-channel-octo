@@ -1,0 +1,76 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { detectAuthSources, maskKey, isAuthError } from '../auth-detect.js'
+
+const NO_CREDS = '/nonexistent/.claude/.credentials.json'
+
+let dir: string
+let credsFile: string
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'ccauth-'))
+  credsFile = join(dir, '.credentials.json')
+})
+afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+describe('maskKey', () => {
+  it('masks the middle of a long key, keeping first 5 + last 4', () => {
+    expect(maskKey('sk-ihDN61Jfo')).toBe('sk-ih****1Jfo')
+  })
+  it('fully masks short/empty values', () => {
+    expect(maskKey('')).toBe('****')
+    expect(maskKey(undefined)).toBe('****')
+    expect(maskKey('short')).toBe('****')
+  })
+})
+
+describe('detectAuthSources', () => {
+  it('reports config.apiKey with a mask (highest precedence)', () => {
+    const sources = detectAuthSources({ apiKey: 'sk-abcDEF12345', env: { ANTHROPIC_API_KEY: 'sk-other' } }, {}, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['config.apiKey'])
+    expect(sources[0].masked).toBe('sk-ab****2345')
+  })
+  it('falls back to sdk.env.ANTHROPIC_API_KEY', () => {
+    const sources = detectAuthSources({ env: { ANTHROPIC_API_KEY: 'sk-env-key' } }, {}, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['config.env'])
+  })
+  it('accepts sdk.env.ANTHROPIC_AUTH_TOKEN (third-party gateway credential var)', () => {
+    const sources = detectAuthSources({ env: { ANTHROPIC_AUTH_TOKEN: 'sk-auth-token' } }, {}, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['config.env'])
+    expect(sources[0].masked).toBe('sk-au****oken')
+  })
+  it('accepts ANTHROPIC_AUTH_TOKEN from the process env too', () => {
+    const sources = detectAuthSources({}, { ANTHROPIC_AUTH_TOKEN: 'sk-proc-token' }, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['process.env'])
+  })
+  it('falls back to the process env (inherited into the SDK subprocess)', () => {
+    const sources = detectAuthSources({}, { ANTHROPIC_API_KEY: 'sk-proc-key' }, NO_CREDS)
+    expect(sources.map((s) => s.kind)).toEqual(['process.env'])
+  })
+  it('reports the OAuth file when nothing else exists', () => {
+    writeFileSync(credsFile, '{}')
+    const sources = detectAuthSources({}, {}, credsFile)
+    expect(sources.map((s) => s.kind)).toEqual(['oauth-file'])
+  })
+  it('returns [] when nothing is available (the Keychain-only case too)', () => {
+    expect(detectAuthSources({}, {}, NO_CREDS)).toEqual([])
+  })
+  it('ignores empty-string keys', () => {
+    expect(detectAuthSources({ apiKey: '', env: { ANTHROPIC_API_KEY: '' } }, { ANTHROPIC_API_KEY: '' }, NO_CREDS)).toEqual([])
+  })
+})
+
+describe('isAuthError', () => {
+  it('matches the SDK subprocess Not-logged-in error', () => {
+    expect(isAuthError(new Error('Claude Code returned an error result: Not logged in · Please run /login'))).toBe(true)
+  })
+  it('matches HTTP 401 / unauthorized / invalid key', () => {
+    expect(isAuthError(new Error('API request failed with status 401 Unauthorized'))).toBe(true)
+    expect(isAuthError(new Error('authentication failed: invalid api key'))).toBe(true)
+  })
+  it('does not match unrelated errors', () => {
+    expect(isAuthError(new Error('timeout after 60s'))).toBe(false)
+    expect(isAuthError(new Error('No conversation found with session ID abc'))).toBe(false)
+  })
+})
