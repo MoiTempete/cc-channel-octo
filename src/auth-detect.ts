@@ -42,11 +42,13 @@ export interface AuthSourceInfo {
 
 /**
  * Mask a secret for logs/diagnosis: `sk-****Jfo` (first 5 + last 4 chars).
- * Returns '****' for short/empty values so a weird key never leaks wholesale.
+ * Credentials shorter than 13 chars (some gateway tokens are 11-12) would
+ * reveal most of their value under that rule, so anything <= 12 is fully
+ * masked.
  */
 export function maskKey(key: string | undefined | null): string {
   if (!key) return '****';
-  if (key.length <= 10) return '****';
+  if (key.length <= 12) return '****';
   return `${key.slice(0, 5)}****${key.slice(-4)}`;
 }
 
@@ -133,5 +135,9 @@ export function detectAuthSources(
  */
 export function isAuthError(err: unknown): boolean {
   const m = err instanceof Error ? err.message : String(err);
-  return /not logged in|please run \/login|authentication|unauthorized|invalid api key|status code 401|\b401\b/i.test(m);
+  // Anchor on the SDK subprocess's own signatures rather than bare words:
+  // "authentication" or "401" alone appear in unrelated tool/service errors
+  // (a skill's HTTP call, a MCP server), and misclassifying those would tell
+  // the owner to re-run setup for nothing.
+  return /not logged in|please run \/login|invalid api key|authentication (failed|error|required)|401 (unauthorized|invalid|error)|invalid (or expired )?credentials/i.test(m);
 }

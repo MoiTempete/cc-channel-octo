@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   parseArgs, isAlive, readPid, readPidRecord, writePid, removePid,
   resolveOwnedPid, resolveSupervisorPaths,
-  readVersion, parseVersion, run,
+  readVersion, parseVersion, run, assertValidBotId,
 } from '../cli.js';
 
 describe('parseArgs', () => {
@@ -66,6 +66,14 @@ describe('parseArgs', () => {
   it('parses --from-claude as a flag', () => {
     expect(parseArgs(['configure', '--from-claude']).fromClaude).toBe(true);
     expect(parseArgs(['configure']).fromClaude).toBe(false);
+  });
+
+  it('rejects a --bot that could escape baseDir (P1-1)', () => {
+    for (const bad of ['../escaped', 'a/b', '.', '..', 'a\\b']) {
+      expect(() => assertValidBotId(bad)).toThrow(/invalid --bot/);
+    }
+    expect(() => assertValidBotId('default')).not.toThrow();
+    expect(() => assertValidBotId('ops-2.b')).not.toThrow();
   });
 });
 
@@ -247,19 +255,30 @@ describe('parseArgs configure', () => {
 describe('run configure with env var fallback', () => {
   let dir: string;
   let cfgPath: string;
-  const originalEnv = process.env.CC_OCTO_CONFIGURE_API_KEY;
+  // Snapshot ALL credential-ish env so a developer machine exporting
+  // ANTHROPIC_API_KEY (exactly the setup this feature targets) can't leak a
+  // real key into a temp config.json or flip these assertions (P1-4).
+  const originalEnv = {
+    CC_OCTO_CONFIGURE_API_KEY: process.env.CC_OCTO_CONFIGURE_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN,
+  };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cc-cli-cfg-'));
     cfgPath = join(dir, 'config.json');
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
   });
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
-    if (originalEnv === undefined) {
-      delete process.env.CC_OCTO_CONFIGURE_API_KEY;
-    } else {
-      process.env.CC_OCTO_CONFIGURE_API_KEY = originalEnv;
+    for (const [k, v] of Object.entries(originalEnv)) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
     }
   });
 
@@ -299,6 +318,26 @@ describe('run configure with env var fallback', () => {
       expect(spy).toHaveBeenCalledWith(expect.stringContaining('required'));
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('does NOT harvest an ambient ANTHROPIC_API_KEY off-TTY (no silent secret persist)', async () => {
+    // The ANTHROPIC_API_KEY fallback requires an explicit yes on a TTY; under
+    // vitest stdin is not a TTY, so the key must be left alone and the command
+    // must fail with the required-key error instead of writing it to disk.
+    delete process.env.CC_OCTO_CONFIGURE_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-do-not-persist-me';
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await run(['configure', '--gateway-url', 'https://gw'], dir);
+      expect(code).toBe(2);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('required'));
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('configured gateway'));
+      expect(existsSync(cfgPath)).toBe(false); // nothing written
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
     }
   });
 

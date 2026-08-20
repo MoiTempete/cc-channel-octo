@@ -16,12 +16,14 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
 
 describe('maskKey', () => {
   it('masks the middle of a long key, keeping first 5 + last 4', () => {
-    expect(maskKey('sk-ihDN61Jfo')).toBe('sk-ih****1Jfo')
+    expect(maskKey('sk-ihDN61JfoXy')).toBe('sk-ih****foXy')
   })
-  it('fully masks short/empty values', () => {
+  it('fully masks short/empty values (<= 12 chars would leak most of the value)', () => {
     expect(maskKey('')).toBe('****')
     expect(maskKey(undefined)).toBe('****')
     expect(maskKey('short')).toBe('****')
+    expect(maskKey('sk-ihDN61Jfo')).toBe('****') // 12 chars: fully masked
+    expect(maskKey('sk-ihDN61Jf')).toBe('****')
   })
 })
 
@@ -65,9 +67,14 @@ describe('isAuthError', () => {
   it('matches the SDK subprocess Not-logged-in error', () => {
     expect(isAuthError(new Error('Claude Code returned an error result: Not logged in · Please run /login'))).toBe(true)
   })
-  it('matches HTTP 401 / unauthorized / invalid key', () => {
+  it('matches explicit auth signatures (401 unauthorized / invalid key)', () => {
     expect(isAuthError(new Error('API request failed with status 401 Unauthorized'))).toBe(true)
     expect(isAuthError(new Error('authentication failed: invalid api key'))).toBe(true)
+  })
+  it('does NOT match bare generic words (a tool call inside the agent may hit a 401)', () => {
+    expect(isAuthError(new Error('tool api returned 401'))).toBe(false)
+    expect(isAuthError(new Error('authentication service is down'))).toBe(false)
+    expect(isAuthError(new Error('unauthorized access to file'))).toBe(false)
   })
   it('does not match unrelated errors', () => {
     expect(isAuthError(new Error('timeout after 60s'))).toBe(false)

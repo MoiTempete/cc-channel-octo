@@ -132,6 +132,8 @@ export interface FromClaudeResult {
   imported: Record<string, string>;
   /** Non-ANTHROPIC_/CLAUDE_CODE_ vars left untouched in the source file. */
   skipped: string[];
+  /** True when sdk.anthropicBaseUrl (configure --gateway-url) would shadow the imported ANTHROPIC_BASE_URL. */
+  baseUrlConflict?: boolean;
 }
 
 /**
@@ -185,6 +187,17 @@ export function configureFromClaude(
       `configure --from-claude: no ANTHROPIC_* / CLAUDE_CODE_* env vars in ${claudeSettingsPath}`,
     )
   }
+  // The imported base URL reaches the SDK subprocess and receives the API key
+  // + all traffic, so it gets the SAME SSRF policy as configure --gateway-url
+  // and loadConfig's anthropicBaseUrl check. The source is the operator's own
+  // settings file, but a hand-typed http://169.254.169.254 is still a mistake.
+  const importedBaseUrl = imported.ANTHROPIC_BASE_URL
+  if (importedBaseUrl !== undefined && !isAllowedApiUrl(importedBaseUrl)) {
+    throw new Error(
+      `configure --from-claude: unsafe ANTHROPIC_BASE_URL ${importedBaseUrl} in ${claudeSettingsPath} ` +
+      `(must be https:// or http://localhost) — fix it in your settings file and re-run`,
+    )
+  }
   const existing = readExisting(configPath)
   const existingSdk =
     existing.sdk && typeof existing.sdk === 'object' && !Array.isArray(existing.sdk)
@@ -200,5 +213,9 @@ export function configureFromClaude(
     sdk: { ...existingSdk, env: { ...existingEnv, ...imported } },
   }
   writeAtomic(configPath, merged)
-  return { imported, skipped }
+  // sdk.anthropicBaseUrl (written by configure --gateway-url) is layered AFTER
+  // sdk.env in buildSdkEnv, so it would silently shadow an imported base URL.
+  const baseUrlConflict =
+    typeof existingSdk.anthropicBaseUrl === 'string' && imported.ANTHROPIC_BASE_URL !== undefined
+  return { imported, skipped, baseUrlConflict }
 }

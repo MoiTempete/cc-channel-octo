@@ -308,10 +308,15 @@ world-readable configs) or in the gateway process environment. There is no
 encrypted/Keychain storage for it (macOS Keychain is not used by design — the
 SDK subprocess needs the raw key either way, and Keychain reads fail in
 headless/daemon contexts). Mitigations already in place: keys are never printed
-in logs or diagnosis output (only a `sk-****abcd` mask), `configure` refuses to
-take the key from `argv` in normal use, and the gateway never echoes the key back
-to IM users. If a key is ever exposed (shell history, a pasted config, this
-README's examples), rotate it at the provider and re-run `configure`.
+in logs or diagnosis output (only a `sk-****abcd` mask; `--from-claude` prints
+every imported value masked except a small allowlist of safe model/effort vars,
+and rejects an imported `ANTHROPIC_BASE_URL` that fails the SSRF policy), the
+key never lands in `argv` or shell history when you use the env-var or
+interactive paths (the ambient `ANTHROPIC_API_KEY` is only persisted after an
+explicit `y` on a TTY — "set the gateway URL" alone never silently writes a
+secret), and the gateway never echoes the key back to IM users. If a key is
+ever exposed (shell history, a pasted config, this README's examples), rotate
+it at the provider and re-run `configure`.
 
 ### Per-group instructions
 

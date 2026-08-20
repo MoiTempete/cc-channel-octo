@@ -42,19 +42,66 @@ export function readHiddenSecret(prompt: string): Promise<string> {
     stdin.resume();
     stdout.write(prompt);
     let input = '';
+    let inEscape = false;
+    const onData = (chunk: Buffer): void => {
+      // Scan BYTE by byte: a paste arrives as ONE chunk, so strict whole-chunk
+      // equality against '\n'/'\r' would swallow the trailing newline into the
+      // secret (an opaque 401 later). Handle control bytes individually and
+      // drop bracketed-paste escape sequences (ESC [ 2 0 0 ~ ...) entirely.
+      for (const byte of chunk) {
+        if (inEscape) {
+          if (byte === 0x7e) inEscape = false; // '~' ends a CSI sequence
+          continue;
+        }
+        if (byte === 0x1b) { inEscape = true; continue; } // ESC
+        if (byte === 0x0a || byte === 0x0d) {
+          // Enter submits the accumulated input.
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener('data', onData);
+          stdout.write('\n');
+          resolve(input);
+          return;
+        }
+        if (byte === 0x03) {
+          // Ctrl+C cancels.
+          stdin.setRawMode(false);
+          stdin.pause();
+          stdin.removeListener('data', onData);
+          stdout.write('\n');
+          resolve('');
+          return;
+        }
+        if (byte === 0x7f || byte === 0x08) {
+          input = input.slice(0, -1); // backspace
+          continue;
+        }
+        if (byte >= 0x20 && byte !== 0x7f) input += String.fromCharCode(byte);
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+/**
+ * Simple y/N confirmation on a TTY (defaults to no). Non-TTY returns false so
+ * headless automation never gets a silent "yes". Used where a side effect
+ * would persist a secret.
+ */
+export function confirmYesNo(prompt: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!stdin.isTTY) return resolve(false);
+    stdin.setRawMode(false);
+    stdin.resume();
+    stdout.write(prompt);
     const onData = (chunk: Buffer): void => {
       const s = String(chunk);
-      if (s === '\n' || s === '\r' || s === '\u0003') {
-        // Enter submits; Ctrl+C cancels (both resolve to the buffer, '' on cancel).
-        stdin.setRawMode(false);
+      if (s.includes('\n') || s.includes('\r')) {
+        const answer = s.replace(/[\r\n]/g, '').trim().toLowerCase();
         stdin.pause();
         stdin.removeListener('data', onData);
         stdout.write('\n');
-        resolve(s === '\u0003' ? '' : input);
-      } else if (s === '\u007f' || s === '\b') {
-        input = input.slice(0, -1); // backspace
-      } else {
-        input += s;
+        resolve(/^y(es)?$/.test(answer));
       }
     };
     stdin.on('data', onData);
@@ -409,6 +456,39 @@ function cmdStatus(paths: SupervisorPaths, procId: ProcIdentityFn): number {
   return 0;
 }
 
+/**
+ * Reject `--bot` values that could escape the per-bot subtree. Mirrors the slug
+ * rule in config.ts resolveBotConfigs (ids become path segments — `../ops` or
+ * `a/b` would escape/alias the intended directory). configure is daemon-driven
+ * in the install flow, so a provisioning payload must not reach join() raw.
+ */
+export function assertValidBotId(bot: string): void {
+  if (!/^[a-zA-Z0-9._-]+$/.test(bot) || bot === '.' || bot === '..') {
+    throw new Error(
+      `configure: invalid --bot "${bot}" — use only letters, digits, dot, underscore, hyphen (no path separators)`,
+    );
+  }
+}
+
+/** Vars from the imported settings env block that are safe to print verbatim. */
+const SAFE_TO_PRINT_VARS = new Set([
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
+  'CLAUDE_CODE_EFFORT_LEVEL',
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+]);
+
+/** Display value for an imported env var: verbatim for known-safe names, else masked. */
+export function displayImportedValue(key: string, value: string): string {
+  if (SAFE_TO_PRINT_VARS.has(key)) return value;
+  return maskKey(value);
+}
+
 /** npm package name installed globally for the gateway. */
 const NPM_PKG = '@mininglamp-oss/cc-channel-octo';
 /**
@@ -517,18 +597,31 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
     case 'doctor':
       return runDoctor(baseDir ? join(baseDir, 'config.json') : undefined);
     case 'configure': {
+      // --bot becomes a path segment; reject ids that could escape baseDir
+      // (same slug rule as config.ts resolveBotConfigs).
+      if (bot) {
+        try {
+          assertValidBotId(bot);
+        } catch (err) {
+          console.error(`cc-channel-octo: ${(err as Error).message}`);
+          return 2;
+        }
+      }
       // --from-claude: copy the whole env block of ~/.claude/settings.json
       // (token + base URL + model mapping) into sdk.env — the one-command path
       // for third-party LLM API users. Mutually exclusive with the explicit
-      // gateway/key flags; combining them is an operator error, not a guess.
+      // gateway/key/model/api-url flags; combining them is an operator error,
+      // not a guess.
       if (fromClaude) {
-        if (gatewayUrl || apiKey) {
-          console.error('cc-channel-octo: --from-claude cannot be combined with --gateway-url/--api-key');
+        if (gatewayUrl || apiKey || model || apiUrl) {
+          console.error(
+            'cc-channel-octo: --from-claude cannot be combined with --gateway-url/--api-key/--model/--api-url',
+          );
           return 2;
         }
         const configPath = join(effBaseDir, ...(bot ? [bot, 'config.json'] : ['config.json']));
         try {
-          const { imported, skipped } = configureFromClaude(
+          const { imported, skipped, baseUrlConflict } = configureFromClaude(
             DEFAULT_CLAUDE_SETTINGS_PATH,
             configPath,
           );
@@ -537,8 +630,12 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
             `into ${configPath}:`,
           );
           for (const [k, v] of Object.entries(imported)) {
-            const shown = /TOKEN|KEY|SECRET/i.test(k) ? maskKey(v) : v;
-            console.log(`  ${k}=${shown}`);
+            console.log(`  ${k}=${displayImportedValue(k, v)}`);
+          }
+          if (baseUrlConflict) {
+            console.log(
+              '  note: sdk.anthropicBaseUrl is also set in this config and takes precedence over the imported ANTHROPIC_BASE_URL',
+            );
           }
           if (skipped.length > 0) {
             console.log(`  (skipped non-ANTHROPIC_/CLAUDE_CODE_ vars: ${skipped.join(', ')})`);
@@ -549,26 +646,27 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
           return 2;
         }
       }
-      // Key resolution chain: explicit --api-key first (never echo it in argv
-      // advice — prefer CC_OCTO_CONFIGURE_API_KEY), then the dedicated env var,
-      // then the ambient ANTHROPIC_API_KEY so a "copy my current environment
-      // into the config" flow works with zero extra steps. When no source has a
-      // key, prompt interactively (hidden input) instead of failing — the key
-      // still never lands in argv or shell history. The chosen source is
-      // reported so the operator knows where the secret came from.
-      let resolvedApiKey =
-        apiKey ??
-        process.env.CC_OCTO_CONFIGURE_API_KEY ??
-        process.env.ANTHROPIC_API_KEY ??
-        '';
+      // Key resolution: explicit --api-key first, then the dedicated
+      // CC_OCTO_CONFIGURE_API_KEY env var (both explicit opt-ins — the key
+      // never appears in argv). The ambient ANTHROPIC_API_KEY is only harvested
+      // after an explicit yes on a TTY: "I only wanted to set the gateway URL"
+      // must not silently persist a secret. Without any source, prompt hidden.
+      let resolvedApiKey = apiKey ?? process.env.CC_OCTO_CONFIGURE_API_KEY ?? '';
       let keySource = apiKey
         ? '--api-key'
         : process.env.CC_OCTO_CONFIGURE_API_KEY
           ? 'CC_OCTO_CONFIGURE_API_KEY'
-          : process.env.ANTHROPIC_API_KEY
-            ? 'ANTHROPIC_API_KEY'
-            : 'none';
-      if (!resolvedApiKey) {
+          : 'none';
+      if (!resolvedApiKey && process.env.ANTHROPIC_API_KEY && stdin.isTTY) {
+        const answer = await confirmYesNo(
+          'ANTHROPIC_API_KEY is set in the environment. Persist it to the config? [y/N] ',
+        );
+        if (answer) {
+          resolvedApiKey = process.env.ANTHROPIC_API_KEY;
+          keySource = 'ANTHROPIC_API_KEY (confirmed)';
+        }
+      }
+      if (!resolvedApiKey && stdin.isTTY) {
         resolvedApiKey = await readHiddenSecret('API key (hidden): ');
         if (resolvedApiKey) keySource = 'interactive prompt';
       }

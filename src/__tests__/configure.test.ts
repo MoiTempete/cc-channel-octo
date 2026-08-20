@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configure, configureFromClaude, normalizeGatewayUrl } from '../configure.js'
@@ -131,6 +131,19 @@ describe('configureFromClaude', () => {
     expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/no env block/)
     writeFileSync(claudeSettingsPath, JSON.stringify({ env: { FOO: 'bar' } }))
     expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/no ANTHROPIC_\* \/ CLAUDE_CODE_\* env vars/)
+  })
+  it('applies the SSRF policy to the imported ANTHROPIC_BASE_URL', () => {
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://169.254.169.254' } }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).toThrow(/unsafe ANTHROPIC_BASE_URL/)
+    expect(existsSync(cfgPath)).toBe(false) // nothing written
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' } }))
+    expect(() => configureFromClaude(claudeSettingsPath, cfgPath)).not.toThrow()
+  })
+  it('flags baseUrlConflict when sdk.anthropicBaseUrl would shadow the imported base URL', () => {
+    writeFileSync(cfgPath, JSON.stringify({ sdk: { anthropicBaseUrl: 'https://gw.example.com' } }))
+    writeFileSync(claudeSettingsPath, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' } }))
+    const result = configureFromClaude(claudeSettingsPath, cfgPath)
+    expect(result.baseUrlConflict).toBe(true)
   })
 })
 
