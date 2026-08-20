@@ -287,9 +287,10 @@ export function configureFromClaude(
           ? (globalExisting.sdk as Record<string, unknown>)
           : {}
       // Gate on the SAME imported variables as the local checks (R7): a global
-      // anthropicBaseUrl with no imported base URL shadows nothing.
+      // anthropicBaseUrl with no imported base URL shadows nothing. Non-empty
+      // on the imported side (R7 carry-forward): an imported "" shadows nothing.
       if (
-        imported.ANTHROPIC_BASE_URL !== undefined &&
+        importedBaseUrlNonEmpty !== undefined &&
         typeof gsdk.anthropicBaseUrl === 'string' &&
         (gsdk.anthropicBaseUrl as string).length > 0
       ) baseUrlConflict = true

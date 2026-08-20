@@ -546,7 +546,9 @@ export async function run(argv: string[], baseDir?: string, procId: ProcIdentity
       // gateway/key/model/api-url flags; combining them is an operator error,
       // not a guess.
       if (fromClaude) {
-        if (gatewayUrl || apiKey || model || apiUrl) {
+        // !== undefined, not truthiness (R7 carry-forward): `--api-key=` empty
+        // forms are a combining error too — reject them consistently.
+        if (gatewayUrl !== undefined || apiKey !== undefined || model !== undefined || apiUrl !== undefined) {
           console.error(
             'cc-channel-octo: --from-claude cannot be combined with --gateway-url/--api-key/--model/--api-url',
           );
