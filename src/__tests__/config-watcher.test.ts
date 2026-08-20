@@ -166,9 +166,13 @@ describe('#157 watchConfig', () => {
       // change desired and rewrite the file → watcher should pick it up on its
       // own (no manual applyNow, so the assertion proves the fs.watch path fired)
       desired = ['a', 'b'];
+      // Give fs.watch a moment to attach before the write lands (an event
+      // between watch() and listener registration can be lost on FSEvents).
+      await new Promise((r) => setTimeout(r, 50));
       atomicWrite(path, ['a', 'b']);
-      // poll up to ~2s for the debounced watcher-driven reconcile to add 'b'
-      for (let i = 0; i < 40 && !mgr.added.includes('b'); i++) {
+      // Poll generously: fs.watch events are async, platform-dependent and can
+      // be delayed under test-suite load (FSEvents). 5s >> 20ms debounce.
+      for (let i = 0; i < 100 && !mgr.added.includes('b'); i++) {
         await new Promise((r) => setTimeout(r, 50));
       }
       expect(mgr.added).toContain('b');

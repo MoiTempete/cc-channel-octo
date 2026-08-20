@@ -109,11 +109,17 @@ describe('queryAgent SDK configuration forwarding', () => {
   it('P1-C: a non-success result THROWS a structured error (not a yielded marker)', async () => {
     // The auth-error UX in handleMessage only fires if the stream throws with
     // an identifiable message. A non-success result must throw, carrying the
-    // subtype + api_error_status, instead of yielding "[Error: subtype]" which
-    // completes the generator normally and never reaches handleMessage's catch.
+    // subtype + api_error_status + errors[], instead of yielding
+    // "[Error: subtype]" which completes the generator normally and never
+    // reaches handleMessage's catch.
     mockQuery.mockReturnValue({
       [Symbol.asyncIterator]: async function* () {
-        yield { type: 'result', subtype: 'error_during_execution', api_error_status: 401 };
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          api_error_status: 401,
+          errors: ['Not logged in · Please run /login'],
+        };
       },
       close: vi.fn(),
     });
@@ -123,7 +129,9 @@ describe('queryAgent SDK configuration forwarding', () => {
       for await (const chunk of queryAgent('hello', makeConfig())) {
         chunks.push(chunk);
       }
-    }).rejects.toThrow('Claude Code returned an error result: error_during_execution (api_error_status=401)');
+    }).rejects.toThrow(
+      'Claude Code returned an error result: error_during_execution: Not logged in · Please run /login (api_error_status=401)',
+    );
     expect(chunks).toHaveLength(0); // nothing yielded — the reply comes from handleMessage's catch
   });
 });

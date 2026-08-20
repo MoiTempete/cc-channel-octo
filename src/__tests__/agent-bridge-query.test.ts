@@ -119,9 +119,10 @@ describe('queryAgent', () => {
   it('P1-C: throws a structured error on a non-success result (so handleMessage can classify it)', async () => {
     // Was: yields "\n[Error: error]" — the generator completed normally and
     // handleMessage's catch (the auth-error UX) was unreachable. Now it throws
-    // with subtype + api_error_status.
+    // with subtype + api_error_status + the SDK's errors[] (where the CLI's own
+    // "Not logged in" text lives — its stderr never reaches us).
     const stream = createMockStream([
-      { type: 'result', subtype: 'error', api_error_status: 401 },
+      { type: 'result', subtype: 'error', api_error_status: 401, errors: ['Not logged in · Please run /login'] },
     ]);
     mockQuery.mockReturnValue(stream);
 
@@ -130,7 +131,7 @@ describe('queryAgent', () => {
       for await (const chunk of queryAgent('test', makeConfig())) {
         chunks.push(chunk);
       }
-    }).rejects.toThrow('Claude Code returned an error result: error (api_error_status=401)');
+    }).rejects.toThrow('Claude Code returned an error result: error: Not logged in · Please run /login (api_error_status=401)');
     expect(chunks).toEqual([]);
   });
 

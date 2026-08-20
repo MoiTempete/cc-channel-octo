@@ -271,7 +271,7 @@ the gateway at boot and reported per bot in the startup log):
 |--------|-------|-------|
 | `sdk.apiKey` | config `sdk` block | Forwarded as `ANTHROPIC_API_KEY`; highest precedence. |
 | `sdk.env.ANTHROPIC_API_KEY` | config `sdk.env` | Same forwarding path. |
-| `ANTHROPIC_API_KEY` in the gateway's shell | exported before `npm start` / `cc-channel-octo start` | Inherited into the SDK subprocess automatically. |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` in the gateway's shell | exported before `npm start` / `cc-channel-octo start` | Inherited into the SDK subprocess automatically. |
 | `claude` OAuth login on the host | `~/.claude/.credentials.json` / macOS Keychain | Only the file form is statically detectable; a Keychain-only login can't be probed without calling the CLI, so the gateway may warn despite a working login. |
 
 With **none** of these, every message fails with `Not logged in · Please run

@@ -403,13 +403,19 @@ export async function* queryAgent(
             // THROW instead of yielding "[Error: <subtype>]": a yielded string
             // completes the generator normally, so handleMessage's catch (the
             // auth-error UX path) is never reached and the IM user gets the
-            // raw marker. Include the structured api_error_status (401 etc.)
-            // so isAuthError can classify it without pattern-matching prose.
-            // Any already-yielded partial output was flushed by stream-relay
-            // before this point — that stays, the reply follows.
-            const status = (message as { api_error_status?: unknown }).api_error_status;
+            // raw marker. Carry BOTH the structured api_error_status (401 etc.)
+            // AND the SDK's `errors` array — that's where the CLI's own text
+            // ("Not logged in · Please run /login") lives, and it is what
+            // isAuthError matches. The CLI's stderr never reaches us (stdio is
+            // ignore unless an opt-in stderr callback is supplied), so the
+            // result errors are the only authentic signal. Any already-yielded
+            // partial output was flushed by stream-relay before this point.
+            const resultMsg = message as { api_error_status?: unknown; errors?: unknown };
+            const status = resultMsg.api_error_status;
             const statusPart = status !== undefined && status !== null ? ` (api_error_status=${status})` : '';
-            throw new Error(`Claude Code returned an error result: ${message.subtype}${statusPart}`);
+            const errors = Array.isArray(resultMsg.errors) ? resultMsg.errors.filter((e): e is string => typeof e === 'string') : [];
+            const errorText = errors.length > 0 ? `: ${errors.join('; ').slice(0, 500)}` : '';
+            throw new Error(`Claude Code returned an error result: ${message.subtype}${errorText}${statusPart}`);
           }
         } else if (
           message.type === 'system' &&
